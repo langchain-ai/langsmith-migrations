@@ -71,9 +71,18 @@ def _to_plain(val):
         return {k: _to_plain(v) for k, v in val.items()}
     return val
 
-
+# Note: This does not preserve the full original object - it strips out the messages specifically.
+# LangSmith does accept a variety of message formats that include additional metadata - this conversion is for simplicity.
 def _to_messages(obj, default_role="user"):
     obj = _to_plain(obj)
+    if isinstance(obj, dict) and "message" in obj:
+        m = obj["message"]
+        if isinstance(m, dict) and {"role", "content"}.issubset(m.keys()):
+            return {"messages": [{"role": m.get("role") or default_role, "content": m.get("content")}]}
+        if isinstance(m, (list, tuple)) and len(m) == 2:
+            role, content = m[0], m[1]
+            return {"messages": [{"role": str(role) or default_role, "content": content}]}
+        return obj
     if isinstance(obj, dict) and isinstance(obj.get("messages"), list):
         msgs = []
         for m in obj["messages"]:
@@ -81,6 +90,8 @@ def _to_messages(obj, default_role="user"):
                 msgs.append({"role": m.get("role") or default_role, "content": m.get("content")})
             elif isinstance(m, str):
                 msgs.append({"role": default_role, "content": m})
+        if not msgs:
+            return obj
         return {"messages": msgs}
     if isinstance(obj, dict) and {"role", "content"}.issubset(obj.keys()):
         return {"messages": [{"role": obj.get("role") or default_role, "content": obj.get("content")}]}
@@ -95,7 +106,8 @@ def _to_messages(obj, default_role="user"):
                 msgs.append({"role": default_role, "content": m})
         if msgs:
             return {"messages": msgs}
-    return {"messages": []}
+        return obj
+    return obj
 
 
 def _ensure_end_times(runs: list[dict]):
@@ -202,7 +214,7 @@ def map_langfuse_to_langsmith(source_trace):
         run_type = _span_type_mapping(obs_type)
         inputs = _to_plain(_get_attr(obs, ['input','inputs']))
         outputs = _to_plain(_get_attr(obs, ['output','outputs']))
-        if run_type == "llm" and _get_attr(obs, ['model']):
+        if run_type == "llm":
             inputs = _to_messages(inputs, default_role="user")
             outputs = _to_messages(outputs, default_role="assistant")
         parent_obs_id = _get_attr(obs, ['parent_observation_id','parentObservationId'])

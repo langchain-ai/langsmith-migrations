@@ -152,7 +152,7 @@ def prompt_dict_to_obj(prompt_dict: dict, include_model: bool = True) -> object:
             model = get_model_instance(model_name, model_params)
             obj = RunnableSequence(chat_prompt, model)
             provider = detect_model_provider(model_name)
-            print(f"       • using {provider} model: {model_name}")
+            print(f"       ... using {provider} model: {model_name}")
         except Exception as e:
             print(
                 f"       ! failed to create model {model_name}, using prompt only: {e}"
