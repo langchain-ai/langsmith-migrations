@@ -10,6 +10,7 @@ AVAILABLE_PROVIDERS = [
 ## Helpers
 ## ------------------------------------------------------------
 def display_config(name: str, resource_name: str):
+    print("\n")
     print("╭─────────────────────────────────────────────────────────────╮")
     print("│                    MIGRATION SETTINGS                       │")
     print("╰─────────────────────────────────────────────────────────────╯")
@@ -56,11 +57,11 @@ def migrate(provider: str):
     
     
 def prompt_for_provider() -> str:
-    print("Select a provider to migrate from:")
+    print("\nSelect a provider to migrate from:")
     for idx, p in enumerate(AVAILABLE_PROVIDERS, start=1):
         print(f"  {idx}. {p}")
     while True:
-        raw = input("Enter number or name (q to quit): ").strip().lower()
+        raw = input("\nEnter number or name (q to quit): ").strip().lower()
         if raw == "q":
             return None
         # number selection
@@ -77,6 +78,6 @@ def prompt_for_provider() -> str:
 if __name__ == "__main__":
     provider = prompt_for_provider()
     if not provider:
-        print("Migration cancelled. Exiting.")
+        print("\nMigration cancelled. Exiting.")
     else:   
         migrate(provider)
