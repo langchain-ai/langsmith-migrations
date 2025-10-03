@@ -28,8 +28,40 @@ def safe_isoformat(dt_obj):
     s = dt_obj.isoformat(timespec='milliseconds')
     return s[:-6] + 'Z' if s.endswith('+00:00') else s
 
+def _compact_ts(ts_val):
+    if ts_val is None:
+        return ""
+    if isinstance(ts_val, str):
+        try:
+            s = ts_val[:-1] + '+00:00' if ts_val.endswith('Z') else ts_val
+            dt_obj = dt.datetime.fromisoformat(s)
+        except Exception:
+            return ""
+    else:
+        dt_obj = ts_val
+    if dt_obj.tzinfo is None:
+        dt_obj = dt_obj.replace(tzinfo=dt.timezone.utc)
+    return dt_obj.strftime('%Y%m%dT%H%M%S') + f"{dt_obj.microsecond:06d}" + 'Z'
+
 
 # ------------ Normalization helpers ------------
+
+def _span_type_mapping(span_type: str) -> str:
+    mapping = {
+        "SPAN": "chain",
+        "AGENT": "chain",
+        "EVENT": "chain",
+        "GENERATION": "llm",
+        "TOOL": "tool",
+        "RETRIEVER": "retriever",
+        "EVALUATOR": "chain",
+        "EMBEDDING": "llm",
+        "GUARDRAIL": "chain"
+    }
+    if span_type in mapping:
+        return mapping[span_type]
+    return "chain"
+
 def _to_plain(val):
     if isinstance(val, SimpleNamespace):
         return {k: _to_plain(getattr(val, k)) for k in vars(val)}
@@ -52,8 +84,6 @@ def _to_messages(obj, default_role="user"):
         return {"messages": msgs}
     if isinstance(obj, dict) and {"role", "content"}.issubset(obj.keys()):
         return {"messages": [{"role": obj.get("role") or default_role, "content": obj.get("content")}]}
-    if isinstance(obj, dict) and isinstance(obj.get("prompt"), str):
-        return {"messages": [{"role": default_role, "content": obj.get("prompt")}]}
     if isinstance(obj, str):
         return {"messages": [{"role": default_role, "content": obj}]}
     if isinstance(obj, list):
@@ -66,22 +96,6 @@ def _to_messages(obj, default_role="user"):
         if msgs:
             return {"messages": msgs}
     return {"messages": []}
-
-
-def _compact_ts(ts_val):
-    if ts_val is None:
-        return ""
-    if isinstance(ts_val, str):
-        try:
-            s = ts_val[:-1] + '+00:00' if ts_val.endswith('Z') else ts_val
-            dt_obj = dt.datetime.fromisoformat(s)
-        except Exception:
-            return ""
-    else:
-        dt_obj = ts_val
-    if dt_obj.tzinfo is None:
-        dt_obj = dt_obj.replace(tzinfo=dt.timezone.utc)
-    return dt_obj.strftime('%Y%m%dT%H%M%S') + f"{dt_obj.microsecond:06d}" + 'Z'
 
 
 def _ensure_end_times(runs: list[dict]):
@@ -185,7 +199,7 @@ def map_langfuse_to_langsmith(source_trace):
     for obs in sorted(obs_list, key=lambda o: _get_attr(o, ['start_time','startTime']) or ''):
         run_id = obs_id_to_run_id[str(_get_attr(obs, ['id']) or '')]
         obs_type = (_get_attr(obs, ['type']) or '').upper()
-        run_type = "llm" if obs_type == "GENERATION" else ("tool" if obs_type == "EVENT" else "chain")
+        run_type = _span_type_mapping(obs_type)
         inputs = _to_plain(_get_attr(obs, ['input','inputs']))
         outputs = _to_plain(_get_attr(obs, ['output','outputs']))
         if run_type == "llm" and _get_attr(obs, ['model']):
