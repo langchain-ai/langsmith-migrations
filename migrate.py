@@ -2,6 +2,10 @@ from providers.langfuse.main import migrate_langfuse
 from config import INCLUDE_MODEL_IN_PROMPTS, NUM_TRACES_TO_REPLAY
 from utils.langfuse import lf_get_projects
 
+AVAILABLE_PROVIDERS = [
+    "langfuse",
+]
+
 ## ------------------------------------------------------------
 ## Helpers
 ## ------------------------------------------------------------
@@ -49,9 +53,30 @@ def migrate(provider: str):
             print("No project found for the configured API keys.")
             return
         migrate_langfuse(projects)   
-    else:
-        print("Invalid provider.\nSupported providers are: 'langfuse'")
     
+    
+def prompt_for_provider() -> str:
+    print("Select a provider to migrate from:")
+    for idx, p in enumerate(AVAILABLE_PROVIDERS, start=1):
+        print(f"  {idx}. {p}")
+    while True:
+        raw = input("Enter number or name (q to quit): ").strip().lower()
+        if raw == "q":
+            return None
+        # number selection
+        if raw.isdigit():
+            i = int(raw)
+            if 1 <= i <= len(AVAILABLE_PROVIDERS):
+                return AVAILABLE_PROVIDERS[i - 1]
+        # name selection
+        if raw in AVAILABLE_PROVIDERS:
+            return raw
+        print("Invalid selection. Please choose a valid number or name from the list.")
+
 
 if __name__ == "__main__":
-    migrate("langfuse")
+    provider = prompt_for_provider()
+    if not provider:
+        print("Migration cancelled. Exiting.")
+    else:   
+        migrate(provider)
