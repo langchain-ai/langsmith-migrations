@@ -1,0 +1,10 @@
+openai
+python-dotenv
+langfuse
+langsmith
+langchain
+langchain-core
+langchain-openai
+langchain-anthropic
+requests
+tqdm
