@@ -17,7 +17,7 @@ def display_config(name: str, resource_name: str):
     print(f"-  Migrate {name} {resource_name}s")
     print(
         f"-  Include models in prompts: {'+ Yes' if INCLUDE_MODEL_IN_PROMPTS else '- No'}"
-        f"-  Number of traces to replay: {NUM_TRACES_TO_REPLAY}"
+        f"\n-  Number of traces to replay: {NUM_TRACES_TO_REPLAY}"
     )
     print("─" * 63)
 
