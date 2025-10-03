@@ -20,12 +20,8 @@ python -u migrate.py
 ```
 
 1. Select the desired observability provider to migrate from
-2. Confirm with `yes` to migrate prompts, datasets, and traces.
+2. Confirm migration settings with `yes` or `no` to migrate prompts, datasets, and traces.
     - Note: Trace replay is for illustrative purposes on how to convert formats. Migrating your full trace data to LangSmith should be done using bulk export functionality.
-
-If you prefer non-interactive runs, you can pipe inputs:
-```bash
-echo -e "langfuse\nyes" | python -u migrate.py
 ```
 
 ## Runbooks (Notebooks)
