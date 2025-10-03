@@ -5,362 +5,227 @@ import datetime as dt
 import time
 import json
 from types import SimpleNamespace
-# Corrected location for MapValue:
-from langfuse.api.resources.commons.types import MapValue
-# Ingestion types:
-from langfuse.api.resources.ingestion.types import (
-    TraceBody,
-    CreateSpanBody,
-    CreateGenerationBody,
-    CreateEventBody,
-    ScoreBody,
-    IngestionEvent_TraceCreate,
-    IngestionEvent_SpanCreate,
-    IngestionEvent_GenerationCreate,
-    IngestionEvent_EventCreate,
-    IngestionEvent_ScoreCreate,
-    IngestionUsage,
-)
-# Other common types:
-from langfuse.api.resources.commons.types import ObservationLevel, ScoreSource, Usage
-from langfuse.api.resources.commons.types.score import Score_Numeric, Score_Categorical, Score_Boolean
 from dotenv import load_dotenv
 from config import NUM_TRACES_TO_REPLAY
-from utils.langsmith import ls_upload_runs
+from utils.langsmith import ls_replay_runs_sdk
 from utils.langfuse import lf_get
  
 load_dotenv()
 
-# --- Helper Function for Robust Datetime Formatting ---
 def safe_isoformat(dt_obj):
-    """Safely formats datetime object to ISO 8601 string, handling None."""
     if dt_obj is None:
         return None
     if not isinstance(dt_obj, dt.datetime):
-        if isinstance(dt_obj, str): # Allow pre-formatted strings
-             try:
-                 dt.datetime.fromisoformat(dt_obj.replace('Z', '+00:00'))
-                 return dt_obj
-             except ValueError:
-                 return None
+        if isinstance(dt_obj, str):
+            try:
+                dt.datetime.fromisoformat(dt_obj.replace('Z', '+00:00'))
+                return dt_obj
+            except ValueError:
+                return None
         return None
-    try:
-        if dt_obj.tzinfo is None:
-            dt_obj = dt_obj.replace(tzinfo=dt.timezone.utc)
-        iso_str = dt_obj.isoformat(timespec='milliseconds')
-        if iso_str.endswith('+00:00'):
-            iso_str = iso_str[:-6] + 'Z'
-        return iso_str
-    except Exception:
-        return None
+    if dt_obj.tzinfo is None:
+        dt_obj = dt_obj.replace(tzinfo=dt.timezone.utc)
+    s = dt_obj.isoformat(timespec='milliseconds')
+    return s[:-6] + 'Z' if s.endswith('+00:00') else s
+
+
+# ------------ Normalization helpers ------------
+def _to_plain(val):
+    if isinstance(val, SimpleNamespace):
+        return {k: _to_plain(getattr(val, k)) for k in vars(val)}
+    if isinstance(val, (list, tuple, set)):
+        return [_to_plain(v) for v in val]
+    if isinstance(val, dict):
+        return {k: _to_plain(v) for k, v in val.items()}
+    return val
+
+
+def _to_messages(obj, default_role="user"):
+    obj = _to_plain(obj)
+    if isinstance(obj, dict) and isinstance(obj.get("messages"), list):
+        msgs = []
+        for m in obj["messages"]:
+            if isinstance(m, dict) and {"role", "content"}.issubset(m.keys()):
+                msgs.append({"role": m.get("role") or default_role, "content": m.get("content")})
+            elif isinstance(m, str):
+                msgs.append({"role": default_role, "content": m})
+        return {"messages": msgs}
+    if isinstance(obj, dict) and {"role", "content"}.issubset(obj.keys()):
+        return {"messages": [{"role": obj.get("role") or default_role, "content": obj.get("content")}]}
+    if isinstance(obj, dict) and isinstance(obj.get("prompt"), str):
+        return {"messages": [{"role": default_role, "content": obj.get("prompt")}]}
+    if isinstance(obj, str):
+        return {"messages": [{"role": default_role, "content": obj}]}
+    if isinstance(obj, list):
+        msgs = []
+        for m in obj:
+            if isinstance(m, dict) and {"role", "content"}.issubset(m.keys()):
+                msgs.append({"role": m.get("role") or default_role, "content": m.get("content")})
+            elif isinstance(m, str):
+                msgs.append({"role": default_role, "content": m})
+        if msgs:
+            return {"messages": msgs}
+    return {"messages": []}
+
+
+def _compact_ts(ts_val):
+    if ts_val is None:
+        return ""
+    if isinstance(ts_val, str):
+        try:
+            s = ts_val[:-1] + '+00:00' if ts_val.endswith('Z') else ts_val
+            dt_obj = dt.datetime.fromisoformat(s)
+        except Exception:
+            return ""
+    else:
+        dt_obj = ts_val
+    if dt_obj.tzinfo is None:
+        dt_obj = dt_obj.replace(tzinfo=dt.timezone.utc)
+    return dt_obj.strftime('%Y%m%dT%H%M%S') + f"{dt_obj.microsecond:06d}" + 'Z'
+
+
+def _ensure_end_times(runs: list[dict]):
+    for r in runs:
+        if isinstance(r, dict) and r.get("end_time") is None:
+            r["end_time"] = r.get("start_time")
+
+
+def _children_map(runs: list[dict]) -> dict:
+    id_to_run = {r["id"]: r for r in runs if isinstance(r, dict)}
+    cmap: dict[str, list[str]] = {}
+    for r in runs:
+        if not isinstance(r, dict):
+            continue
+        pid = r.get("parent_run_id")
+        if pid:
+            cmap.setdefault(pid, []).append(r["id"])
+    for pid, kids in list(cmap.items()):
+        kids.sort(key=lambda k: id_to_run.get(k, {}).get('start_time') or '')
+        cmap[pid] = kids
+    return cmap
+
+
+def _assign_dotted_order(runs: list[dict], root_id: str):
+    id_to_run = {r["id"]: r for r in runs if isinstance(r, dict)}
+    cmap = _children_map(runs)
+    def assign(run_id: str, parent_dotted: str | None):
+        run = id_to_run.get(run_id)
+        if not run:
+            return
+        ts = run.get('start_time') or run.get('end_time') or id_to_run.get(root_id, {}).get('start_time')
+        seg = _compact_ts(ts) + run_id
+        dotted = seg if not parent_dotted else f"{parent_dotted}.{seg}"
+        run["dotted_order"] = dotted
+        for kid in cmap.get(run_id, []):
+            assign(kid, dotted)
+    assign(root_id, None)
+    # root end_time to max child
+    max_child = None
+    for cid in cmap.get(root_id, []):
+        child = id_to_run.get(cid)
+        if child and child.get("end_time"):
+            s = child["end_time"]
+            try:
+                s = s[:-1] + '+00:00' if isinstance(s, str) and s.endswith('Z') else s
+                dt_obj = dt.datetime.fromisoformat(s) if isinstance(s, str) else s
+                if not max_child or dt_obj > max_child:
+                    max_child = dt_obj
+            except Exception:
+                continue
+    root = id_to_run.get(root_id)
+    if root and max_child:
+        if max_child.tzinfo is None:
+            max_child = max_child.replace(tzinfo=dt.timezone.utc)
+        root["end_time"] = max_child.strftime('%Y-%m-%dT%H:%M:%S') + f".{max_child.microsecond:06d}Z"
+
+
+def _get_attr(obj, names: list[str]):
+    for n in names:
+        v = None
+        if isinstance(obj, dict):
+            v = obj.get(n)
+        else:
+            try:
+                v = getattr(obj, n)
+            except Exception:
+                v = None
+        if v is not None:
+            return v
+    return None
 
 
 def map_langfuse_to_langsmith(source_trace):
-    """
-    Maps Langfuse trace data to LangSmith-compatible format.
-    Returns a list of LangSmith run objects.
-    """
-    langsmith_runs = []
-    
-    # Map trace to LangSmith run
-    trace_run = {
-        "id": source_trace.id,
-        "name": getattr(source_trace, 'name', None) or "Trace",
+    runs: list[dict] = []
+    # Root
+    new_root_id = str(uuid.uuid4())
+    root = {
+        "id": new_root_id,
+        "trace_id": new_root_id,
+        "name": _get_attr(source_trace, ['name']) or "Trace",
         "run_type": "chain",
-        "session_id": getattr(source_trace, 'session_id', None),
-        "session_name": None,
-        "tags": getattr(source_trace, 'tags', []) or [],
-        "metadata": source_trace.metadata if isinstance(getattr(source_trace, 'metadata', {}), dict) else {},
-        "inputs": getattr(source_trace, 'input', None),
-        "outputs": getattr(source_trace, 'output', None),
-        "start_time": safe_isoformat(getattr(source_trace, 'timestamp', None)),
-        "end_time": None,
+        "session_id": _get_attr(source_trace, ['session_id','sessionId']),
+        "tags": _get_attr(source_trace, ['tags']) or [],
+        "metadata": _get_attr(source_trace, ['metadata']) if isinstance(_get_attr(source_trace, ['metadata']), dict) else {},
+        "inputs": _get_attr(source_trace, ['input','inputs']),
+        "outputs": _get_attr(source_trace, ['output','outputs']),
+        "start_time": safe_isoformat(_get_attr(source_trace, ['timestamp','start_time','startTime'])),
+        "end_time": safe_isoformat(_get_attr(source_trace, ['end_time','endTime'])),
         "status": "completed",
-        "error": None,
-        "invocation_params": {},
-        "usage_metadata": {},
-        "child_runs": []
+        "parent_run_id": None,
     }
-    
-    # Process observations to create child runs
-    observations = getattr(source_trace, 'observations', []) or []
-    sorted_observations = sorted(observations, key=lambda o: getattr(o, 'start_time', None) or '')
-    observation_runs = {}
-    
-    for obs in sorted_observations:
-        run_id = str(uuid.uuid4())
-        observation_runs[getattr(obs, 'id', run_id)] = run_id
-        
-        # Determine run type based on observation type
-        run_type = "chain"
-        if getattr(obs, 'type', '').upper() == "GENERATION":
-            run_type = "llm"
-        elif getattr(obs, 'type', '').upper() == "EVENT":
-            run_type = "tool"
-        
-        # Map model information
-        invocation_params = {}
-        if getattr(obs, 'model', None):
-            invocation_params["model"] = obs.model
-        if isinstance(getattr(obs, 'model_parameters', None), dict):
-            param_mapping = {
-                "temperature": "temperature",
-                "top_p": "top_p",
-                "max_tokens": "max_tokens",
-                "frequency_penalty": "frequency_penalty",
-                "presence_penalty": "presence_penalty",
-                "seed": "seed",
-                "stop": "stop_sequences",
-                "top_k": "top_k"
-            }
-            for langfuse_key, langsmith_key in param_mapping.items():
-                if langfuse_key in obs.model_parameters:
-                    invocation_params[langsmith_key] = obs.model_parameters[langfuse_key]
-        
-        # Map usage information
-        usage_metadata = {}
-        usage = getattr(obs, 'usage', None)
-        if isinstance(usage, dict):
-            if usage.get('input') is not None:
-                usage_metadata['input_tokens'] = usage.get('input')
-            if usage.get('output') is not None:
-                usage_metadata['output_tokens'] = usage.get('output')
-            if usage.get('total') is not None:
-                usage_metadata['total_tokens'] = usage.get('total')
-        
-        inputs = getattr(obs, 'input', None)
-        outputs = getattr(obs, 'output', None)
-        
-        if getattr(obs, 'type', '').upper() == "GENERATION" and getattr(obs, 'model', None):
-            if isinstance(inputs, dict) and "messages" in inputs:
-                inputs = inputs
-            elif isinstance(inputs, str):
-                inputs = {"prompt": inputs}
-            if isinstance(outputs, dict) and "messages" in outputs:
-                outputs = outputs
-            elif isinstance(outputs, str):
-                outputs = {"completion": outputs}
-        
+    runs.append(root)
+    # Children: two-pass to preserve nesting (parent before child lookup)
+    obs_list = _get_attr(source_trace, ['observations']) or []
+    # First pass: assign stable new run IDs for each observation
+    obs_id_to_run_id: dict[str, str] = {}
+    for obs in obs_list:
+        lf_obs_id = _get_attr(obs, ['id']) or str(uuid.uuid4())
+        obs_id_to_run_id[str(lf_obs_id)] = str(uuid.uuid4())
+    # Second pass: build runs in temporal order and set parent_run_id from mapping
+    for obs in sorted(obs_list, key=lambda o: _get_attr(o, ['start_time','startTime']) or ''):
+        run_id = obs_id_to_run_id[str(_get_attr(obs, ['id']) or '')]
+        obs_type = (_get_attr(obs, ['type']) or '').upper()
+        run_type = "llm" if obs_type == "GENERATION" else ("tool" if obs_type == "EVENT" else "chain")
+        inputs = _to_plain(_get_attr(obs, ['input','inputs']))
+        outputs = _to_plain(_get_attr(obs, ['output','outputs']))
+        if run_type == "llm" and _get_attr(obs, ['model']):
+            inputs = _to_messages(inputs, default_role="user")
+            outputs = _to_messages(outputs, default_role="assistant")
+        parent_obs_id = _get_attr(obs, ['parent_observation_id','parentObservationId'])
+        parent_run_id = obs_id_to_run_id.get(str(parent_obs_id)) if parent_obs_id else root["id"]
         run = {
             "id": run_id,
-            "name": getattr(obs, 'name', None) or f"{str(getattr(obs, 'type', 'obs')).lower()}_{getattr(obs, 'id', '')}",
+            "trace_id": root["id"],
+            "name": _get_attr(obs, ['name']) or f"{str(_get_attr(obs, ['type']) or 'obs').lower()}_{_get_attr(obs, ['id']) or ''}",
             "run_type": run_type,
-            "parent_run_id": observation_runs.get(getattr(obs, 'parent_observation_id', None)),
-            "session_id": getattr(source_trace, 'session_id', None),
+            "parent_run_id": parent_run_id,
+            "session_id": _get_attr(source_trace, ['session_id','sessionId']),
             "tags": [],
-            "metadata": obs.metadata if isinstance(getattr(obs, 'metadata', {}), dict) else {},
+            "metadata": _get_attr(obs, ['metadata']) if isinstance(_get_attr(obs, ['metadata']), dict) else {},
             "inputs": inputs,
             "outputs": outputs,
-            "start_time": safe_isoformat(getattr(obs, 'start_time', None)),
-            "end_time": safe_isoformat(getattr(obs, 'end_time', None)) if getattr(obs, 'end_time', None) else None,
+            "start_time": safe_isoformat(_get_attr(obs, ['start_time','startTime'])),
+            "end_time": safe_isoformat(_get_attr(obs, ['end_time','endTime'])) if _get_attr(obs, ['end_time','endTime']) else None,
             "status": "completed",
-            "error": getattr(obs, 'status_message', None) or None,
-            "invocation_params": invocation_params,
-            "usage_metadata": usage_metadata
         }
-        
-        if getattr(obs, 'type', '').upper() == "GENERATION" and getattr(obs, 'model', None):
-            model_lower = obs.model.lower()
-            if "openai" in model_lower:
-                run["metadata"]["ls_provider"] = "openai"
-            elif "anthropic" in model_lower:
-                run["metadata"]["ls_provider"] = "anthropic"
-            elif "google" in model_lower:
-                run["metadata"]["ls_provider"] = "google"
-            else:
-                run["metadata"]["ls_provider"] = "unknown"
-        
-        langsmith_runs.append(run)
-    
-    # Add scores as feedback
-    scores = getattr(source_trace, 'scores', []) or []
-    for score in scores:
-        score_obs_id = getattr(score, 'observation_id', None)
-        feedback = {
-            "id": str(uuid.uuid4()),
-            "run_id": observation_runs.get(score_obs_id, source_trace.id),
-            "key": getattr(score, 'name', None),
-            "score": getattr(score, 'value', None),
-            "comment": getattr(score, 'comment', None),
-            "metadata": score.metadata if isinstance(getattr(score, 'metadata', {}), dict) else {},
-            "source": getattr(score, 'source', None),
-            "timestamp": safe_isoformat(getattr(score, 'timestamp', None))
-        }
-        langsmith_runs.append({"type": "feedback", **feedback})
-    
-    return langsmith_runs
+        if run_type == "llm" and _get_attr(obs, ['model']):
+            model_lower = str(_get_attr(obs, ['model'])).lower()
+            run.setdefault("metadata", {})
+            run["metadata"]["ls_provider"] = "openai" if "openai" in model_lower else ("anthropic" if "anthropic" in model_lower or "claude" in model_lower else ("google" if "google" in model_lower else "unknown"))
+        runs.append(run)
+    # Finish: end times + dotted order
+    _ensure_end_times(runs)
+    _assign_dotted_order(runs, root["id"])
+    return runs
 
 
-def _wrap(obj):
-    """Recursively wrap dicts into SimpleNamespace for attribute access."""
-    if isinstance(obj, dict):
-        return SimpleNamespace(**{k: _wrap(v) for k, v in obj.items()})
-    if isinstance(obj, list):
-        return [ _wrap(v) for v in obj ]
-    return obj
-
-
-def transform_trace_to_ingestion_batch(source_trace):
-    """
-    Transforms a fetched TraceWithFullDetails object into a list of
-    IngestionEvent objects suitable for the batch ingestion endpoint.
-    Uses the ORIGINAL source trace ID for the new trace.
-    Generates new IDs for observations/scores within the trace.
-    Maps parent/child relationships using new observation IDs.
-    """
-    ingestion_events = []
-    preserved_trace_id = source_trace.id
-    obs_id_map = {}
- 
-    # 1. Create Trace Event
-    trace_metadata = source_trace.metadata if isinstance(source_trace.metadata, dict) else {}
-    trace_body = TraceBody(
-        id=preserved_trace_id,
-        timestamp=source_trace.timestamp,
-        name=source_trace.name,
-        user_id=source_trace.user_id,
-        input=source_trace.input,
-        output=source_trace.output,
-        session_id=source_trace.session_id,
-        release=source_trace.release,
-        version=source_trace.version,
-        metadata=trace_metadata or None,
-        tags=source_trace.tags if source_trace.tags is not None else [],
-        public=source_trace.public,
-        environment=source_trace.environment if source_trace.environment else "default",
-    )
-    event_timestamp_str = safe_isoformat(dt.datetime.now(dt.timezone.utc))
-    if not event_timestamp_str:
-         print("Error: Could not format timestamp for trace event. Skipping trace.")
-         return []
-    trace_event_id = str(uuid.uuid4())
-    ingestion_events.append(
-        IngestionEvent_TraceCreate(id=trace_event_id, timestamp=event_timestamp_str, body=trace_body)
-    )
- 
-    # 2. Create Observation Events
-    sorted_observations = sorted(source_trace.observations, key=lambda o: o.start_time)
-    for source_obs in sorted_observations:
-        new_obs_id = str(uuid.uuid4())
-        obs_id_map[source_obs.id] = new_obs_id
-        new_parent_observation_id = obs_id_map.get(source_obs.parent_observation_id) if source_obs.parent_observation_id else None
-        obs_metadata = source_obs.metadata if isinstance(source_obs.metadata, dict) else {}
- 
-        model_params_mapped = None
-        if isinstance(source_obs.model_parameters, dict): model_params_mapped = source_obs.model_parameters
-        elif source_obs.model_parameters is not None: print(f"Warning: Obs {source_obs.id} model_parameters type {type(source_obs.model_parameters)}, skipping.")
- 
-        common_body_args = {
-            "id": new_obs_id, "trace_id": preserved_trace_id, "name": source_obs.name,
-            "start_time": source_obs.start_time, "metadata": obs_metadata or None,
-            "input": source_obs.input, "output": source_obs.output, "level": source_obs.level,
-            "status_message": source_obs.status_message, "parent_observation_id": new_parent_observation_id,
-            "version": source_obs.version, "environment": source_obs.environment if source_obs.environment else "default",
-        }
- 
-        event_body = None; ingestion_event_type = None
-        event_specific_timestamp = safe_isoformat(dt.datetime.now(dt.timezone.utc))
-        if not event_specific_timestamp: print(f"Error: Could not format timestamp for obs {new_obs_id}. Skipping."); continue
- 
-        try:
-            if source_obs.type == "SPAN":
-                event_body = CreateSpanBody(**common_body_args, end_time=source_obs.end_time)
-                ingestion_event_type = IngestionEvent_SpanCreate
-            elif source_obs.type == "EVENT":
-                event_body = CreateEventBody(**common_body_args)
-                ingestion_event_type = IngestionEvent_EventCreate
-            elif source_obs.type == "GENERATION":
-                usage_to_pass = None
-                if isinstance(source_obs.usage, Usage):
-                    usage_data = {k: getattr(source_obs.usage, k, None) for k in ['input', 'output', 'total', 'unit', 'input_cost', 'output_cost', 'total_cost']}
-                    filtered_usage_data = {k: v for k, v in usage_data.items() if v is not None}
-                    if filtered_usage_data: usage_to_pass = Usage(**filtered_usage_data)
-                elif source_obs.usage is not None: print(f"Warning: Obs {source_obs.id} has usage type {type(source_obs.usage)}. Skipping.")
- 
-                event_body = CreateGenerationBody(
-                    **common_body_args, end_time=source_obs.end_time,
-                    completion_start_time=source_obs.completion_start_time,
-                    model=source_obs.model, model_parameters=model_params_mapped,
-                    usage=usage_to_pass, cost_details=source_obs.cost_details,
-                    usage_details=source_obs.usage_details,
-                    prompt_name=getattr(source_obs, 'prompt_name', None),
-                    prompt_version=getattr(source_obs, 'prompt_version', None),
-                )
-                ingestion_event_type = IngestionEvent_GenerationCreate
-            else: print(f"Warning: Unknown obs type '{source_obs.type}' for ID {source_obs.id}. Skipping."); continue
- 
-            if event_body and ingestion_event_type:
-                event_envelope_id = str(uuid.uuid4())
-                ingestion_events.append(
-                    ingestion_event_type(id=event_envelope_id, timestamp=event_specific_timestamp, body=event_body)
-                )
-        except Exception as e: print(f"Error creating obs body for {source_obs.id} (type: {source_obs.type}): {e}"); continue
- 
-    # 3. Create Score Events
-    for source_score in source_trace.scores:
-        new_score_id = str(uuid.uuid4())
-        new_observation_id = obs_id_map.get(source_score.observation_id) if source_score.observation_id else None
-        score_metadata = source_score.metadata if isinstance(source_score.metadata, dict) else {}
- 
-        score_body_value = None
-        if source_score.data_type == "CATEGORICAL":
-            # For categorical, use the string_value field from the source
-             if hasattr(source_score, 'string_value') and isinstance(getattr(source_score, 'string_value', None), str):
-                 score_body_value = source_score.string_value
-             else:
-                 # Fallback or warning if string_value is missing for categorical
-                 print(f"      Warning: Categorical score {source_score.id} is missing string_value. Attempting to use numeric value '{source_score.value}' as string.")
-                 score_body_value = str(source_score.value) if source_score.value is not None else None
- 
-        elif source_score.data_type in ["NUMERIC", "BOOLEAN"]:
-            # For numeric/boolean, use the numeric value field
-            score_body_value = source_score.value # Already float or None
-        else:
-            print(f"      Warning: Unknown score dataType '{source_score.data_type}' for score {source_score.id}. Attempting numeric value.")
-            score_body_value = source_score.value
- 
-        # If after all checks, value is still None, skip score
-        if score_body_value is None:
-             print(f"      Warning: Could not determine valid value for score {source_score.id} (dataType: {source_score.data_type}). Skipping score.")
-             continue
- 
-        try:
-            score_body = ScoreBody(
-                id=new_score_id,
-                trace_id=preserved_trace_id,
-                name=source_score.name,
-                # Pass the correctly typed value
-                value=score_body_value,
-                # string_value field might not be needed if value holds the category string
-                # string_value=string_value if source_score.data_type == "CATEGORICAL" else None, # Optional: maybe pass string_value only for categorical?
-                source=source_score.source,
-                comment=source_score.comment,
-                observation_id=new_observation_id,
-                timestamp=source_score.timestamp,
-                config_id=source_score.config_id,
-                metadata=score_metadata or None,
-                data_type=source_score.data_type,
-                environment=source_score.environment if source_score.environment else "default",
-            )
-            event_timestamp_str = safe_isoformat(dt.datetime.now(dt.timezone.utc))
-            if not event_timestamp_str: print(f"Error: Could not format timestamp for score {new_score_id}. Skipping."); continue
-            event_envelope_id = str(uuid.uuid4())
-            ingestion_events.append(
-                IngestionEvent_ScoreCreate(id=event_envelope_id, timestamp=event_timestamp_str, body=score_body)
-            )
-        except Exception as e: print(f"Error creating score body for {source_score.id}: {e}"); continue
- 
-    return ingestion_events
- 
- 
 def fetch_and_transform_traces(workspace_id: str, sleep_between_gets=0.7, max_retries=4):
     """
     Fetch most recent traces using Public API and transform them into ingestion events.
     Enforces NUM_TRACES_TO_REPLAY as a hard cap.
     """
     try:
-        mt = int(NUM_TRACES_TO_REPLAY)
-        max_traces = mt if mt > 0 else None
+        max_traces = int(NUM_TRACES_TO_REPLAY)
     except Exception:
         max_traces = None
 
@@ -411,8 +276,7 @@ def fetch_and_transform_traces(workspace_id: str, sleep_between_gets=0.7, max_re
                 continue
 
             try:
-                source_obj = _wrap(source_detail)
-                runs_batch = map_langfuse_to_langsmith(source_obj)
+                runs_batch = map_langfuse_to_langsmith(source_detail)
                 if not runs_batch:
                     total_failed_transform += 1
                     continue
@@ -429,12 +293,9 @@ def fetch_and_transform_traces(workspace_id: str, sleep_between_gets=0.7, max_re
             break
         page += 1
 
-    # Upload accumulated runs to LangSmith workspace
+    # Upload accumulated runs to LangSmith workspace (SDK only)
     if accumulated_runs:
-        try:
-            ls_upload_runs(workspace_id, accumulated_runs)
-        except Exception as e:
-            print(f"Error uploading runs to LangSmith: {e}")
+        ls_replay_runs_sdk(workspace_id, accumulated_runs)
 
     print(f"        • Processed traces: {total_processed}")
     print(f"        • Failed fetching details (after retries): {total_failed_fetch}")

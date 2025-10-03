@@ -61,30 +61,85 @@ def ls_push_prompt(
     return url
 
 
-def ls_upload_runs(workspace_id: str, runs: list[dict]):
-    """Upload runs and feedback to LangSmith workspace via REST API.
 
-    Expects run dicts shaped similarly to LangSmith runs. Feedback items can be
-    passed as dicts with key 'type' == 'feedback'.
+def ls_replay_runs_sdk(workspace_id: str, runs: list[dict]):
+    """Replay runs using LangSmith Python SDK create_run/update_run with proper ordering.
+
+    - Creates runs (root first, then children) using create_run
+    - Updates runs with end_time/outputs/error using update_run
     """
-    hdrs = LS_HEADERS | {"X-Tenant-Id": workspace_id}
-    for item in runs:
-        if isinstance(item, dict) and item.get("type") == "feedback":
-            payload = {
-                "run_id": item.get("run_id"),
-                "key": item.get("key"),
-                "score": item.get("score"),
-                "comment": item.get("comment"),
-                "source": item.get("source"),
-                "metadata": item.get("metadata", {}),
-                "timestamp": item.get("timestamp"),
-            }
-            requests.post(f"{LS_BASE}/api/v1/feedback", headers=hdrs, json=payload).raise_for_status()
-            continue
+    session = requests.Session()
+    session.headers.update({"X-Tenant-Id": workspace_id})
+    client = Client(api_key=LS_API_KEY, api_url=LS_BASE, session=session)
 
-        # Normal run
-        run_payload = {k: v for k, v in item.items() if k in {
-            "id","name","run_type","inputs","outputs","start_time","end_time","session_id",
-            "parent_run_id","tags","metadata","error","invocation_params","usage_metadata"
-        }}
-        requests.post(f"{LS_BASE}/api/v1/runs", headers=hdrs, json=run_payload).raise_for_status()
+    def _parse_dt(val):
+        if not val:
+            return None
+        if isinstance(val, str):
+            try:
+                s = val
+                if s.endswith('Z'):
+                    s = s[:-1] + '+00:00'
+                from datetime import datetime
+                return datetime.fromisoformat(s)
+            except Exception:
+                return None
+        return val
+
+    # Partition feedback vs runs
+    normal_runs = [r for r in runs if isinstance(r, dict) and r.get("type") != "feedback"]
+    feedbacks = [r for r in runs if isinstance(r, dict) and r.get("type") == "feedback"]
+
+    # Sort by presence of parent (root first), then by start_time
+    def _key(r):
+        return (1 if r.get("parent_run_id") else 0, r.get("start_time") or "")
+    normal_runs.sort(key=_key)
+
+    # First pass: create_run
+    for r in normal_runs:
+        create_params = {
+            "id": r.get("id"),
+            "name": r.get("name") or "Run",
+            "run_type": r.get("run_type") or "chain",
+            "inputs": r.get("inputs") or {},
+            "start_time": _parse_dt(r.get("start_time")),
+            "tags": r.get("tags") or [],
+            "trace_id": r.get("trace_id") or r.get("id"),
+            "parent_run_id": r.get("parent_run_id") or r.get("parent_id"),
+            "dotted_order": r.get("dotted_order"),
+            "extra": {"metadata": r.get("metadata") or {},
+                       "invocation_params": r.get("invocation_params") or {},
+                       "usage_metadata": r.get("usage_metadata") or {}},
+        }
+        # Remove empty extra
+        if not any(create_params["extra"].values()):
+            create_params.pop("extra")
+        # Prune None
+        create_params = {k: v for k, v in create_params.items() if v is not None}
+        client.create_run(**create_params)
+
+    # Second pass: update_run (end_time, outputs, error)
+    for r in normal_runs:
+        outputs_val = r.get("outputs")
+        update_params = {
+            "run_id": r.get("id"),
+            "end_time": _parse_dt(r.get("end_time") or r.get("start_time")),
+            "outputs": outputs_val if isinstance(outputs_val, dict) else ( {"output": outputs_val} if outputs_val is not None else {} ),
+            "error": r.get("error"),
+            "trace_id": r.get("trace_id") or r.get("id"),
+            "dotted_order": r.get("dotted_order"),
+            "parent_run_id": r.get("parent_run_id") or r.get("parent_id"),
+        }
+        update_params = {k: v for k, v in update_params.items() if v is not None}
+        client.update_run(**update_params)
+
+    # Feedbacks
+    for fb in feedbacks:
+        client.create_feedback(
+            run_id=fb.get("run_id"),
+            key=fb.get("key"),
+            score=fb.get("score"),
+            comment=fb.get("comment"),
+            source=fb.get("source"),
+            metadata=fb.get("metadata") or {},
+        )
