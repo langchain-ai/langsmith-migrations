@@ -145,15 +145,6 @@ def map_arize_spans_to_langsmith(traces_df) -> list[dict]:
     if traces_df is None or traces_df.empty:
         return []
     
-    # Debug: print columns and first row
-    print(f"       [DEBUG] Columns: {list(traces_df.columns)}")
-    if len(traces_df) > 0:
-        print(f"       [DEBUG] First row sample:")
-        for col in traces_df.columns:
-            val = traces_df.iloc[0][col]
-            if val is not None and str(val) != 'nan' and str(val) != '':
-                print(f"         {col}: {str(val)[:100]}")
-    
     runs = []
     
     # Group spans by trace_id
@@ -253,14 +244,6 @@ def map_arize_spans_to_langsmith(traces_df) -> list[dict]:
             tool_result = _get_col(row, 'attributes.tool.result')
             if tool_result:
                 outputs["tool_result"] = tool_result
-            
-            # Debug: log all spans
-            print(f"       [DEBUG] Span: '{span_name}' kind={span_kind} run_type={run_type} parent={orig_parent_id}")
-            print(f"         inputs: {bool(inputs)} outputs: {bool(outputs)}")
-            if inputs:
-                print(f"         input_keys: {list(inputs.keys())}")
-            if outputs:
-                print(f"         output_keys: {list(outputs.keys())}")
             
             # Extract metadata
             metadata = {}

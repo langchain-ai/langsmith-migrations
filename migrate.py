@@ -58,8 +58,8 @@ def migrate(provider: str):
         migrate_langfuse(projects)
     elif provider == "arize":
         display_config("Arize", "space")
-        should_migrate = capture_user_selection("Arize", "datasets")
-        if not should_migrate:
+        migrate = capture_user_selection("Arize", "space")
+        if not migrate:
             return
         migrate_arize()   
     

@@ -106,7 +106,6 @@ def ls_replay_runs_sdk(workspace_id: str, runs: list[dict], project_name: str = 
     normal_runs.sort(key=_key)
 
     # First pass: create_run
-    logged_first = False
     for r in normal_runs:
         create_params = {
             "id": r.get("id"),
@@ -122,6 +121,7 @@ def ls_replay_runs_sdk(workspace_id: str, runs: list[dict], project_name: str = 
                        "invocation_params": r.get("invocation_params") or {},
                        "usage_metadata": r.get("usage_metadata") or {}},
         }
+        # Set project_name to organize traces under the source project name 
         if project_name:
             create_params["project_name"] = project_name
         # Remove empty extra
@@ -129,13 +129,6 @@ def ls_replay_runs_sdk(workspace_id: str, runs: list[dict], project_name: str = 
             create_params.pop("extra")
         # Prune None
         create_params = {k: v for k, v in create_params.items() if v is not None}
-        
-        # Debug: log first run
-        if not logged_first:
-            import json
-            print(f"       [DEBUG] First run params: {json.dumps(create_params, default=str, indent=2)}")
-            logged_first = True
-        
         client.create_run(**create_params)
 
     # Second pass: update_run (end_time, outputs, error)
