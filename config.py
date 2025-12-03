@@ -3,13 +3,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Langfuse configuration
 LF_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY")
 LF_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
 LF_BASE = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
 
+# Arize configuration
+ARIZE_API_KEY = os.getenv("ARIZE_API_KEY")
+ARIZE_SPACE_ID = os.getenv("ARIZE_SPACE_ID")
+ARIZE_PROJECT_NAME = os.getenv("ARIZE_PROJECT_NAME")  # e.g. "migration-test-project"
+
+# LangSmith configuration
 LS_API_KEY = os.getenv("LANGSMITH_API_KEY")
 LS_ORG_ID = os.environ["LANGSMITH_ORGANIZATION_ID"]
 LS_BASE = os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+LS_WORKSPACE_ID = os.getenv("LANGSMITH_WORKSPACE_ID")  # Optional: skip workspace creation
 
 LF_HEADERS = {
     "Content-Type": "application/json",

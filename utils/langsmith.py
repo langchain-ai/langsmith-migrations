@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import requests
 from typing import Optional
 
@@ -20,12 +22,15 @@ def ls_get_or_create_workspace(ws_name: str) -> dict:
         return next(ws for ws in ex if ws["display_name"] == ws_name)
 
 
-def ls_create_dataset(workspace_id: str, name: str) -> str:
+def ls_create_dataset(workspace_id: str, name: str) -> str | None:
+    """Create a dataset or return existing one's ID. Returns None if already exists."""
     hdrs = LS_HEADERS | {"X-Tenant-Id": workspace_id}
     r = requests.post(f"{LS_BASE}/api/v1/datasets", headers=hdrs, json={"name": name})
-    if r.status_code == 409:  # already there
-        r = requests.get(f"{LS_BASE}/api/v1/datasets", headers=hdrs).json()
-        return next(ds["id"] for ds in r if ds["name"] == name)
+    if r.status_code == 409:  # already exists
+        # Try to find existing dataset by name
+        datasets = requests.get(f"{LS_BASE}/api/v1/datasets", headers=hdrs).json()
+        existing = next((ds["id"] for ds in datasets if ds["name"] == name), None)
+        return existing  # None if not found (skip migration for this dataset)
     r.raise_for_status()
     return r.json()["id"]
 
@@ -62,11 +67,16 @@ def ls_push_prompt(
 
 
 
-def ls_replay_runs_sdk(workspace_id: str, runs: list[dict]):
+def ls_replay_runs_sdk(workspace_id: str, runs: list[dict], project_name: str = None):
     """Replay runs using LangSmith Python SDK create_run/update_run with proper ordering.
 
     - Creates runs (root first, then children) using create_run
     - Updates runs with end_time/outputs/error using update_run
+    
+    Args:
+        workspace_id: LangSmith workspace ID.
+        runs: List of run dicts to upload.
+        project_name: LangSmith project name for traces (default: "default").
     """
     session = requests.Session()
     session.headers.update({"X-Tenant-Id": workspace_id})
@@ -96,6 +106,7 @@ def ls_replay_runs_sdk(workspace_id: str, runs: list[dict]):
     normal_runs.sort(key=_key)
 
     # First pass: create_run
+    logged_first = False
     for r in normal_runs:
         create_params = {
             "id": r.get("id"),
@@ -111,11 +122,20 @@ def ls_replay_runs_sdk(workspace_id: str, runs: list[dict]):
                        "invocation_params": r.get("invocation_params") or {},
                        "usage_metadata": r.get("usage_metadata") or {}},
         }
+        if project_name:
+            create_params["project_name"] = project_name
         # Remove empty extra
         if not any(create_params["extra"].values()):
             create_params.pop("extra")
         # Prune None
         create_params = {k: v for k, v in create_params.items() if v is not None}
+        
+        # Debug: log first run
+        if not logged_first:
+            import json
+            print(f"       [DEBUG] First run params: {json.dumps(create_params, default=str, indent=2)}")
+            logged_first = True
+        
         client.create_run(**create_params)
 
     # Second pass: update_run (end_time, outputs, error)
@@ -143,3 +163,11 @@ def ls_replay_runs_sdk(workspace_id: str, runs: list[dict]):
             source=fb.get("source"),
             metadata=fb.get("metadata") or {},
         )
+    
+    # Explicit flush to ensure all data is sent
+    try:
+        if hasattr(client, 'flush'):
+            client.flush()
+    except Exception as e:
+        print(f"       ! Flush error: {e}")
+        raise

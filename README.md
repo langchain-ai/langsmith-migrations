@@ -29,6 +29,7 @@ Each provider has a runbook notebook to illustrate how to migrate your existing 
 
 Each observability provider in this repo has a runbook under its corresponding directory.
 - Langfuse runbook: `providers/langfuse/runbook.ipynb`
+- Arize runbook: `providers/arize/runbook.ipynb` (coming soon)
 
 Usage:
 1. Open the runbook in your IDE or using ```jupyter notebook``` in the root directory.
