@@ -4,7 +4,7 @@ from arize.experimental.datasets import ArizeDatasetsClient
 from arize.exporter import ArizeExportClient
 from arize.utils.types import Environments
 
-from config import ARIZE_API_KEY, ARIZE_SPACE_ID, ARIZE_PROJECT_NAME
+from config import ARIZE_API_KEY, ARIZE_SPACE_ID, ARIZE_PROJECT_NAMES
 
 
 def get_arize_client() -> ArizeDatasetsClient:
@@ -12,6 +12,11 @@ def get_arize_client() -> ArizeDatasetsClient:
     return ArizeDatasetsClient(
         api_key=ARIZE_API_KEY,
     )
+
+
+def arize_get_projects() -> list[dict]:
+    """Get list of Arize projects from config."""
+    return [{"name": name} for name in ARIZE_PROJECT_NAMES]
 
 
 def arize_get_datasets() -> pd.DataFrame:
@@ -47,10 +52,11 @@ def get_arize_export_client() -> ArizeExportClient:
     return ArizeExportClient()
 
 
-def arize_export_traces(days_back: int = 7) -> pd.DataFrame:
+def arize_export_traces(project_name: str, days_back: int = 7) -> pd.DataFrame:
     """Export traces from Arize.
 
     Args:
+        project_name: The Arize project name (model_id).
         days_back: Number of days back to export traces from (default: 7).
 
     Returns a DataFrame with trace/span data.
@@ -62,7 +68,7 @@ def arize_export_traces(days_back: int = 7) -> pd.DataFrame:
     
     traces_df = client.export_model_to_df(
         space_id=ARIZE_SPACE_ID,
-        model_id=ARIZE_PROJECT_NAME,
+        model_id=project_name,
         environment=Environments.TRACING,
         start_time=start_time,
         end_time=end_time,

@@ -11,7 +11,7 @@ LF_BASE = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
 # Arize configuration
 ARIZE_API_KEY = os.getenv("ARIZE_API_KEY")
 ARIZE_SPACE_ID = os.getenv("ARIZE_SPACE_ID")
-ARIZE_PROJECT_NAME = os.getenv("ARIZE_PROJECT_NAME")  # e.g. "migration-test-project"
+ARIZE_PROJECT_NAMES = [p.strip() for p in os.getenv("ARIZE_PROJECT_NAMES", "").split(",") if p.strip()]
 
 # LangSmith configuration
 LS_API_KEY = os.getenv("LANGSMITH_API_KEY")

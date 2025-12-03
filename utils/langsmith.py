@@ -156,11 +156,4 @@ def ls_replay_runs_sdk(workspace_id: str, runs: list[dict], project_name: str = 
             source=fb.get("source"),
             metadata=fb.get("metadata") or {},
         )
-    
-    # Explicit flush to ensure all data is sent
-    try:
-        if hasattr(client, 'flush'):
-            client.flush()
-    except Exception as e:
-        print(f"       ! Flush error: {e}")
-        raise
+
