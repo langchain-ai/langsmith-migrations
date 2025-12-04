@@ -1,9 +1,12 @@
 from providers.langfuse.main import migrate_langfuse
+from providers.phoenix.main import migrate_phoenix
 from config import INCLUDE_MODEL_IN_PROMPTS, NUM_TRACES_TO_REPLAY
 from utils.langfuse import lf_get_projects
+from utils.phoenix import phoenix_get_projects
 
 AVAILABLE_PROVIDERS = [
     "langfuse",
+    "arize-phoenix",
 ]
 
 ## ------------------------------------------------------------
@@ -53,7 +56,17 @@ def migrate(provider: str):
         if not projects:
             print("No project found for the configured API keys.")
             return
-        migrate_langfuse(projects)   
+        migrate_langfuse(projects)
+    elif provider == "arize-phoenix":
+        display_config("Arize Phoenix", "project")
+        projects = phoenix_get_projects()
+        if not projects:
+            print("No projects found in Arize Phoenix.")
+            return
+        migrate = capture_user_selection("Arize Phoenix", "projects")
+        if not migrate:
+            return
+        migrate_phoenix(projects)
     
     
 def prompt_for_provider() -> str:
