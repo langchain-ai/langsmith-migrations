@@ -13,6 +13,11 @@ ARIZE_API_KEY = os.getenv("ARIZE_API_KEY")
 ARIZE_SPACE_ID = os.getenv("ARIZE_SPACE_ID")
 ARIZE_PROJECT_NAMES = [p.strip() for p in os.getenv("ARIZE_PROJECT_NAMES", "").split(",") if p.strip()]
 
+# Arize: Phoenix configuration
+PHOENIX_API_KEY = os.getenv("PHOENIX_API_KEY")
+PHOENIX_HOST = os.getenv("PHOENIX_HOST", "https://app.phoenix.arize.com")
+PHOENIX_SPACE = os.getenv("PHOENIX_SPACE", "")  # e.g., "christine"
+
 # LangSmith configuration
 LS_API_KEY = os.getenv("LANGSMITH_API_KEY")
 LS_ORG_ID = os.environ["LANGSMITH_ORGANIZATION_ID"]

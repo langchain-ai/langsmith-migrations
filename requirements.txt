@@ -9,4 +9,5 @@ langchain-anthropic
 requests
 tqdm
 arize
+arize-phoenix-client
 pandas
