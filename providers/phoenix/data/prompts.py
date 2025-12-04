@@ -25,52 +25,37 @@ def string_to_chat_template(template: str) -> ChatPromptTemplate:
     return ChatPromptTemplate.from_template(template)
 
 
-def detect_model_provider(model_name: str) -> str:
-    """Detect if a model is from OpenAI, Anthropic, or other provider."""
-    if not model_name:
-        return "openai"
-
-    model_lower = model_name.lower()
-
-    if any(x in model_lower for x in ["claude", "anthropic"]):
-        return "anthropic"
-
-    if any(
-        x in model_lower
-        for x in ["gpt", "openai", "o1", "text-davinci", "text-curie", "text-babbage", "text-ada"]
-    ):
-        return "openai"
-
-    return "openai"
-
-
-def get_model_instance(model_name: str, model_params: dict = None):
-    """Get the appropriate LangChain model instance based on the model name."""
-    provider = detect_model_provider(model_name)
+def get_model_instance(model_name: str, model_provider: str = None, model_params: dict = None):
+    """Get the appropriate LangChain model instance based on model name and provider.
+    
+    Returns None for unsupported providers (prompt-only mode).
+    """
     params = dict(model_params or {})
     
     # Handle Phoenix nested invocation_parameters format:
     # {'type': 'openai', 'openai': {'temperature': 1.0}}
-    if 'type' in params:
-        param_type = params.pop('type', None)
-        # Extract actual params from nested provider key
-        if param_type and param_type in params:
-            nested_params = params.pop(param_type, {})
-            params.update(nested_params)
-        # Also try 'openai' or 'anthropic' keys
-        for key in ['openai', 'anthropic']:
-            if key in params:
-                nested_params = params.pop(key, {})
-                params.update(nested_params)
+    # Extract actual params from under the provider key
+    params.pop('type', None)  # Remove 'type' key
+    provider_key = (model_provider or "").lower()
+    if provider_key and provider_key in params:
+        nested_params = params.pop(provider_key, {})
+        params.update(nested_params)
     
     # Remove invalid keys
     params.pop("model", None)
     params.pop("supported_languages", None)
-
-    if provider == "anthropic":
+    
+    # Normalize provider string
+    provider = (model_provider or "").upper()
+    
+    # Only support OpenAI and Anthropic in LangChain
+    if provider == "ANTHROPIC" or (model_name and "claude" in model_name.lower()):
         return ChatAnthropic(model=model_name, **params)
-    else:
+    elif provider == "OPENAI" or (model_name and any(x in model_name.lower() for x in ["gpt", "o1"])):
         return ChatOpenAI(model=model_name, **params)
+    else:
+        # Unsupported provider (DeepSeek, etc.) - return None to use prompt-only mode
+        return None
 
 
 def phoenix_prompt_conversion(phoenix_prompt, prompt_info: dict = None) -> dict:
@@ -166,14 +151,17 @@ def phoenix_prompt_conversion(phoenix_prompt, prompt_info: dict = None) -> dict:
 def prompt_dict_to_obj(prompt_dict: dict, include_model: bool = True) -> object:
     chat_prompt = string_to_chat_template(prompt_dict["prompt_template"])
     model_name = prompt_dict["metadata"].get("model")
+    model_provider = prompt_dict["metadata"].get("model_provider", "")
     model_params = prompt_dict["metadata"].get("model_params", {})
 
     if model_name and include_model:
         try:
-            model = get_model_instance(model_name, model_params)
-            obj = RunnableSequence(chat_prompt, model)
-            provider = detect_model_provider(model_name)
-            print(f"       ... using {provider} model: {model_name}")
+            model = get_model_instance(model_name, model_provider, model_params)
+            if model is not None:
+                obj = RunnableSequence(chat_prompt, model)
+                print(f"       ... using {model_provider or 'detected'} model: {model_name}")
+            else:
+                obj = chat_prompt
         except Exception as e:
             print(f"       ! failed to create model {model_name}, using prompt only: {e}")
             obj = chat_prompt

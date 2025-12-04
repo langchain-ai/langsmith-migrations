@@ -1,15 +1,12 @@
 from providers.langfuse.main import migrate_langfuse
-from providers.arize.main import migrate_arize
 from providers.phoenix.main import migrate_phoenix
 from config import INCLUDE_MODEL_IN_PROMPTS, NUM_TRACES_TO_REPLAY
 from utils.langfuse import lf_get_projects
-from utils.arize import arize_get_projects
 from utils.phoenix import phoenix_get_projects
 
 AVAILABLE_PROVIDERS = [
     "langfuse",
-    "arize",
-    "phoenix",
+    "arize-phoenix",
 ]
 
 ## ------------------------------------------------------------
@@ -60,23 +57,13 @@ def migrate(provider: str):
             print("No project found for the configured API keys.")
             return
         migrate_langfuse(projects)
-    elif provider == "arize":
-        display_config("Arize", "project")
-        projects = arize_get_projects()
-        if not projects:
-            print("No projects found. Set ARIZE_PROJECT_NAMES in .env (comma-separated).")
-            return
-        migrate = capture_user_selection("Arize", "projects")
-        if not migrate:
-            return
-        migrate_arize(projects)
-    elif provider == "phoenix":
-        display_config("Phoenix", "project")
+    elif provider == "arize-phoenix":
+        display_config("Arize Phoenix", "project")
         projects = phoenix_get_projects()
         if not projects:
-            print("No projects found in Phoenix.")
+            print("No projects found in Arize Phoenix.")
             return
-        migrate = capture_user_selection("Phoenix", "projects")
+        migrate = capture_user_selection("Arize Phoenix", "projects")
         if not migrate:
             return
         migrate_phoenix(projects)
