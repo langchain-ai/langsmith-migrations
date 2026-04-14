@@ -55,7 +55,7 @@ def ls_push_prompt(
     pat = pat or LS_API_KEY
     session = requests.Session()
     session.headers.update({"X-Tenant-Id": workspace_id})
-    client = Client(api_key=pat, api_url=LS_BASE, session=session)
+    client = Client(api_key=pat, api_url=f"{LS_BASE}/api/v1", session=session)
     
     url = client.push_prompt(
         name,
@@ -80,7 +80,7 @@ def ls_replay_runs_sdk(workspace_id: str, runs: list[dict], project_name: str = 
     """
     session = requests.Session()
     session.headers.update({"X-Tenant-Id": workspace_id})
-    client = Client(api_key=LS_API_KEY, api_url=LS_BASE, session=session)
+    client = Client(api_key=LS_API_KEY, api_url=f"{LS_BASE}/api/v1", session=session)
 
     def _parse_dt(val):
         if not val:
