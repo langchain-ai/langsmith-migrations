@@ -1,18 +1,14 @@
-from providers.langfuse.main import migrate_langfuse
-from providers.phoenix.main import migrate_phoenix
-from config import INCLUDE_MODEL_IN_PROMPTS, NUM_TRACES_TO_REPLAY
-from utils.langfuse import lf_get_projects
-from utils.phoenix import phoenix_get_projects
-
 AVAILABLE_PROVIDERS = [
     "langfuse",
     "arize-phoenix",
+    "mlflow",
 ]
 
 ## ------------------------------------------------------------
 ## Helpers
 ## ------------------------------------------------------------
 def display_config(name: str, resource_name: str):
+    from config import INCLUDE_MODEL_IN_PROMPTS, NUM_TRACES_TO_REPLAY
     print("\n")
     print("╭─────────────────────────────────────────────────────────────╮")
     print("│                    MIGRATION SETTINGS                       │")
@@ -47,7 +43,12 @@ def capture_user_selection(name: str,resource_name: str):
 ## Main Migration Function
 ## ------------------------------------------------------------
 def migrate(provider: str):
+    if provider == "mlflow":
+        from providers.mlflow.main import interactive_migration
+        return interactive_migration()
     if provider == "langfuse":
+        from providers.langfuse.main import migrate_langfuse
+        from utils.langfuse import lf_get_projects
         display_config("Langfuse", "project")
         migrate = capture_user_selection("Langfuse", "project")
         projects = lf_get_projects()
@@ -58,6 +59,8 @@ def migrate(provider: str):
             return
         migrate_langfuse(projects)
     elif provider == "arize-phoenix":
+        from providers.phoenix.main import migrate_phoenix
+        from utils.phoenix import phoenix_get_projects
         display_config("Arize Phoenix", "project")
         projects = phoenix_get_projects()
         if not projects:
@@ -88,9 +91,22 @@ def prompt_for_provider() -> str:
         print("Invalid selection. Please choose a valid number or name from the list.")
 
 
-if __name__ == "__main__":
-    provider = prompt_for_provider()
+def main(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(description="Migrate resources to LangSmith")
+    parser.add_argument('--provider', choices=AVAILABLE_PROVIDERS)
+    args, provider_args = parser.parse_known_args(argv)
+    provider = args.provider or prompt_for_provider()
     if not provider:
-        print("\nMigration cancelled. Exiting.")
-    else:   
-        migrate(provider)
+        print("Migration cancelled.")
+        return
+    if provider == 'mlflow' and provider_args:
+        from providers.mlflow.main import cli
+        return cli(provider_args)
+    if provider_args:
+        parser.error('Additional CLI arguments are supported only for MLflow')
+    return migrate(provider)
+
+
+if __name__ == '__main__':
+    main()

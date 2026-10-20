@@ -2,3 +2,16 @@
 .env
 .venv
 __pycache__
+
+# Local migration outputs and credentials
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+credentials.json
+node_modules/
+.tools/
+migration-export/
+replay-export/
+*.pyc
