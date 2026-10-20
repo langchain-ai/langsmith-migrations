@@ -35,3 +35,21 @@ Usage:
 1. Open the runbook in your IDE or using ```jupyter notebook``` in the root directory.
 2. Review sections for prompts, datasets, and traces.
 3. Execute cells to inspect transformations and payloads.
+
+
+## MLflow
+
+MLflow is available through `python migrate.py` and the noninteractive
+`python migrate.py --provider mlflow ...` entry point.
+
+- [MLflow runbook](providers/mlflow/runbook.ipynb): resource migration followed by
+  equivalent tracing, dataset, evaluation, and prompt code.
+- [Provider setup and limitations](providers/mlflow/README.md): local CLI and
+  Databricks execution, authentication, retries, timestamp replay, and Agents UI.
+- [Databricks companion](providers/mlflow/03_databricks_export_migrate.ipynb):
+  self-contained export, preview, import, and read-back notebook.
+
+MLflow dependencies are optional: install `providers/mlflow/requirements.txt`
+only when using this provider. The root dispatcher imports only the selected
+provider. MLflow does not require an organization ID when migrating into an
+explicit workspace.
