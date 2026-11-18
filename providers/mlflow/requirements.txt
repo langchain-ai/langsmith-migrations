@@ -1,0 +1,5 @@
+# Versions used for live local migration validation (Python 3.12).
+mlflow[databricks]==3.17.1
+databricks-agents==1.12.0
+langsmith==0.14.11
+langchain-core==1.6.12

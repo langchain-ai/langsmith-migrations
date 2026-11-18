@@ -15,7 +15,7 @@ PHOENIX_SPACE = os.getenv("PHOENIX_SPACE", "")
 
 # LangSmith configuration
 LS_API_KEY = os.getenv("LANGSMITH_API_KEY")
-LS_ORG_ID = os.environ["LANGSMITH_ORGANIZATION_ID"]
+LS_ORG_ID = os.getenv("LANGSMITH_ORGANIZATION_ID")
 LS_BASE = os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
 LS_WORKSPACE_ID = os.getenv("LANGSMITH_WORKSPACE_ID")  # Optional: skip workspace creation
 
@@ -36,3 +36,9 @@ INCLUDE_MODEL_IN_PROMPTS = (
 NUM_TRACES_TO_REPLAY = (
     int(os.getenv("NUM_TRACES_TO_REPLAY", "0"))
 )
+
+# MLflow: authenticate outside the notebook/CLI; no source setup is required.
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "databricks")
+MLFLOW_EXPERIMENT_ID = os.getenv("MLFLOW_EXPERIMENT_ID")
+MLFLOW_MIGRATION_OUTPUT = os.getenv("MLFLOW_MIGRATION_OUTPUT", "migration-export")
+MLFLOW_MIGRATION_PREFIX = os.getenv("MLFLOW_MIGRATION_PREFIX", "mlflow-migration")
