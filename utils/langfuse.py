@@ -69,6 +69,56 @@ def lf_get_project_prompts(project_id: str) -> list[dict]:
     return detailed
 
 
+def lf_get_prompt_history(project_id: str) -> list[dict]:
+    """Return every version of every prompt, for migrating version history.
+
+    Result: [{"name": str, "versions": [prompt detail dicts], "failed_versions": [int]}].
+    The listing reports each prompt's version numbers; each one is then fetched with
+    ?version=N so it carries its own content, config, labels and commit message.
+    If the listing does not report versions, only the default (production-labelled)
+    version is fetched, as lf_get_project_prompts does.
+    """
+    metas: list[dict] = []
+    page = 1
+    while True:
+        listing = lf_get("/api/public/v2/prompts", project_id=project_id, page=page)
+        objs = (
+            listing.get("objects")
+            if isinstance(listing, dict) and "objects" in listing
+            else listing.get("data") if isinstance(listing, dict) else listing
+        ) or []
+        if not objs:
+            break
+        metas.extend(objs)
+        page += 1
+
+    history: list[dict] = []
+    for meta in metas:
+        name = meta.get("name") or meta.get("slug") or meta.get("id")
+        if not name:
+            continue
+        name = str(name)
+        path = f"/api/public/v2/prompts/{quote(name, safe='')}"
+        numbers = sorted({int(v) for v in (meta.get("versions") or [])})
+        versions: list[dict] = []
+        failed: list = []
+        if numbers:
+            for n in numbers:
+                try:
+                    versions.append(lf_get(path, project_id=project_id, version=n))
+                except Exception as e:
+                    print(f"      ! couldn't fetch '{name}' version {n}: {e}")
+                    failed.append(n)
+        else:
+            try:
+                versions.append(lf_get(path, project_id=project_id))
+            except Exception as e:
+                print(f"      ! couldn't fetch '{name}': {e}")
+                failed.append("default")
+        history.append({"name": name, "versions": versions, "failed_versions": failed})
+    return history
+
+
 def lf_get_project_datasets(
     project_id: str
 ) -> dict[str, list[dict]]:
