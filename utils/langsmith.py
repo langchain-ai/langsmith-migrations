@@ -4,6 +4,7 @@ import requests
 from typing import Optional
 
 from langsmith import Client
+from langsmith.utils import LangSmithConflictError
 from config import LS_BASE, LS_HEADERS, LS_API_KEY
 
 
@@ -84,42 +85,57 @@ def ls_push_prompt_version(
     tags are prompt-level tags. commit_tags are applied to the new commit, one at a
     time and best effort: a tag LangSmith refuses is reported with the reason, and
     does not stop the migration or leave the commit untagged by the others.
-    Returns (url, applied_tags, failed) where failed is a list of (tag, reason).
+
+    LangSmith refuses a commit identical to the previous one (409 "Nothing to
+    commit"), for example two versions that differ only in a model config that
+    is not exported. The version is then the previous commit, so its tags go on
+    that commit and unchanged is True.
+
+    Returns (url, applied_tags, failed, unchanged); failed is a list of (tag, reason).
     """
     client = _ls_client(workspace_id)
-    url = client.push_prompt(
-        name,
-        object=prompt_obj,
-        description=description,
-        tags=tags,
-        commit_description=commit_description,
-    )
+    unchanged = False
+    try:
+        url = client.push_prompt(
+            name,
+            object=prompt_obj,
+            description=description,
+            tags=tags,
+            commit_description=commit_description,
+        )
+        # The URL ends in the first 8 characters of the new commit's hash.
+        short_hash = url.split("?")[0].rstrip("/").split("/")[-1]
+        commit = next(
+            (
+                c
+                for c in client.list_prompt_commits(name, limit=10)
+                if (c.commit_hash or "").startswith(short_hash)
+            ),
+            None,
+        )
+    except LangSmithConflictError:
+        unchanged = True
+        commit = next(iter(client.list_prompt_commits(name, limit=1)), None)
+        short_hash = (commit.commit_hash or "")[:8] if commit else "?"
+        url = f"{name}:{short_hash}"
+
     applied: list[str] = []
     failed: list[tuple[str, str]] = []
     if not commit_tags:
-        return url, applied, failed
-
-    # The URL ends in the first 8 characters of the new commit's hash.
-    short_hash = url.split("?")[0].rstrip("/").split("/")[-1]
-    commit = next(
-        (
-            c
-            for c in client.list_prompt_commits(name, limit=10)
-            if (c.commit_hash or "").startswith(short_hash)
-        ),
-        None,
-    )
+        return url, applied, failed, unchanged
     if commit is None:
-        return url, applied, [(t, f"commit {short_hash} not found") for t in commit_tags]
+        return url, applied, [(t, f"commit {short_hash} not found") for t in commit_tags], unchanged
     for tag in commit_tags:
         try:
-            # No public SDK method tags an existing commit yet. The SDK returns
-            # commit.id as a UUID, which the request body cannot serialize.
+            # One tag per request, so a tag LangSmith refuses does not block the
+            # others (push_prompt(commit_tags=...) would fail them together).
+            # list_prompt_commits returns commit.id as a UUID; the request body
+            # needs a string.
             client._create_commit_tags(f"{commit.owner}/{commit.repo}", str(commit.id), tag)
             applied.append(tag)
         except Exception as e:
             failed.append((tag, str(e)[:200]))
-    return url, applied, failed
+    return url, applied, failed, unchanged
 
 
 def ls_replay_runs_sdk(workspace_id: str, runs: list[dict], project_name: str = None):

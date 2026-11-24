@@ -1,3 +1,4 @@
+import re
 import traceback
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableSequence
@@ -76,10 +77,28 @@ def get_model_instance(model_name: str, model_params: dict = None):
 def langsmith_prompt_name(lf_name: str) -> str:
     """Name a Langfuse prompt gets in LangSmith.
 
-    Lowercased, spaces become hyphens. Langfuse folder names ("team/prompt") use
-    "/", which LangSmith reads as owner/name, so it becomes "-" too.
+    LangSmith prompt names allow only lowercase letters, digits, "-" and "_", so
+    the name is lowercased and every other character becomes "-": spaces, "."
+    ("summarize.v2"), ":" (read as name:commit) and "/" (Langfuse folders, read
+    as owner/name).
     """
-    return str(lf_name).lower().replace(" ", "-").replace("/", "-")
+    name = re.sub(r"[^a-z0-9_-]", "-", str(lf_name).lower()).strip("-")
+    return name or "prompt"
+
+
+# A Langfuse variable, {{name}}, not already a triple-brace or a mustache tag
+# such as {{#section}}.
+_LF_VARIABLE = re.compile(r"(?<!\{)\{\{\s*([A-Za-z_]\w*)\s*\}\}(?!\})")
+
+
+def _unescaped_variables(text: str) -> str:
+    """Rewrite {{var}} as {{{var}}}.
+
+    Langfuse inserts variable values as given; mustache's {{var}} HTML-escapes
+    them (& becomes &amp;, < becomes &lt;), which breaks prompts that pass in
+    XML, code or documents. {{{var}}} inserts the value as given.
+    """
+    return _LF_VARIABLE.sub(r"{{{\1}}}", text) if isinstance(text, str) else text
 
 
 def build_chat_prompt(lf_prompt: dict) -> ChatPromptTemplate:
@@ -87,15 +106,16 @@ def build_chat_prompt(lf_prompt: dict) -> ChatPromptTemplate:
 
     - Every line of every message is kept (the previous string round trip dropped
       any line that did not start with "role:").
-    - Langfuse's {{variable}} syntax is kept as is. LangSmith supports mustache
-      templates, so literal braces such as JSON examples stay literal.
+    - Mustache template format, so literal braces such as JSON examples stay
+      literal. Variables are written {{{variable}}} so their values are inserted
+      as given, as Langfuse does (see _unescaped_variables).
     - Chat placeholders become optional MessagesPlaceholders.
     """
     raw = lf_prompt.get("prompt")
     messages: list = []
 
     if isinstance(raw, str):
-        messages.append(("human", raw))
+        messages.append(("human", _unescaped_variables(raw)))
     elif isinstance(raw, list):
         for item in raw:
             if not isinstance(item, dict):
@@ -110,7 +130,7 @@ def build_chat_prompt(lf_prompt: dict) -> ChatPromptTemplate:
                     f"'{lf_prompt.get('name')}', treating it as 'human'"
                 )
                 role = "human"
-            messages.append((role, item.get("content", "")))
+            messages.append((role, _unescaped_variables(item.get("content", ""))))
     else:
         raise ValueError(
             f"prompt '{lf_prompt.get('name')}' version {lf_prompt.get('version')} "
@@ -151,9 +171,17 @@ def migrate_prompts(workspace_id: str, project_id: str):
         return
 
     print(f"    - migrating {len(history)} prompt(s)…")
+    claimed: dict[str, str] = {}  # LangSmith name -> Langfuse name that took it
     for entry in history:
         lf_name = entry["name"]
         ls_name = langsmith_prompt_name(lf_name)
+        if ls_name in claimed:
+            print(
+                f"       x prompt '{lf_name}' skipped: its LangSmith name '{ls_name}' is also the "
+                f"name of '{claimed[ls_name]}'. Rename one of them in Langfuse and re-run."
+            )
+            continue
+        claimed[ls_name] = lf_name
         try:
             if entry.get("failed_versions"):
                 print(
@@ -171,7 +199,7 @@ def migrate_prompts(workspace_id: str, project_id: str):
                 labels = [l for l in (lf_p.get("labels") or []) if l not in _AUTO_LABELS]
                 obj = prompt_to_obj(lf_p, include_model=INCLUDE_MODEL_IN_PROMPTS)
                 message = lf_p.get("commitMessage") or ""
-                url, applied, failed_tags = ls_push_prompt_version(
+                url, applied, failed_tags, unchanged = ls_push_prompt_version(
                     ls_name,
                     lf_p.get("description") or "",
                     obj,
@@ -183,7 +211,8 @@ def migrate_prompts(workspace_id: str, project_id: str):
                         + (f": {message}" if message else "")
                     )[:1000],
                 )
-                print(f"       • {lf_name} v{number} (tags: {applied or 'none'})  →  {url}")
+                note = "same as the previous version, so no new commit; " if unchanged else ""
+                print(f"       • {lf_name} v{number} ({note}tags: {applied or 'none'})  →  {url}")
                 for tag, reason in failed_tags:
                     print(f"         ! could not apply tag '{tag}' to this commit: {reason}")
             print(f"         {lf_name}  =>  LangSmith prompt '{ls_name}'")

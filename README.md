@@ -49,11 +49,15 @@ What the Langfuse migration does and does not carry over:
 - **Prompts**: every version of every prompt is pushed to LangSmith oldest first, so it
   keeps the same commit history. Langfuse labels (except the automatic `latest`),
   including `production` and `staging`, are applied as commit tags; a tag LangSmith
-  refuses is reported with the reason.
-  Langfuse's `{{variable}}` syntax is kept (mustache format), and chat placeholders
-  become optional message placeholders. Prompt names are lowercased and spaces and `/`
-  become `-`; the script prints each Langfuse name next to its LangSmith name. A prompt
-  that already exists in LangSmith is skipped, so re-runs do not add duplicate commits.
+  refuses is reported with the reason. A version identical to the one before it (for
+  example a re-publish) adds no commit; its labels go on the previous commit.
+  Prompts use the mustache format. Variables become `{{{variable}}}` so values are
+  inserted as given, as in Langfuse (mustache's `{{variable}}` would HTML-escape them).
+  Chat placeholders become optional message placeholders. Prompt names are lowercased
+  and any character other than letters, digits, `-` and `_` becomes `-`; the script
+  prints each Langfuse name next to its LangSmith name, and skips a prompt whose
+  LangSmith name is already taken by another prompt in the same run. A prompt that
+  already exists in LangSmith is skipped, so re-runs do not add duplicate commits.
   If a run stops partway through a prompt, delete that prompt in LangSmith and re-run.
 - **Datasets**: dataset items are copied as examples. Experiments, dataset runs, scores
   and dataset versions are not migrated.
