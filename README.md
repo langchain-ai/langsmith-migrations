@@ -42,6 +42,27 @@ Review its runbook before importing data. The Langfuse and Arize Phoenix trace
 replay examples illustrate format conversion; use bulk export functionality when
 planning a full trace migration.
 
+## Langfuse notes
+
+What the Langfuse migration does and does not carry over:
+
+- **Prompts**: every version of every prompt is pushed to LangSmith oldest first, so it
+  keeps the same commit history. Langfuse labels (except the automatic `latest`) are
+  applied as commit tags. `staging` and `production` are reserved in LangSmith, so a
+  label with one of those names is reported and you promote that commit in the UI.
+  Langfuse's `{{variable}}` syntax is kept (mustache format), and chat placeholders
+  become optional message placeholders. Prompt names are lowercased and spaces and `/`
+  become `-`; the script prints each Langfuse name next to its LangSmith name. A prompt
+  that already exists in LangSmith is skipped, so re-runs do not add duplicate commits.
+  If a run stops partway through a prompt, delete that prompt in LangSmith and re-run.
+- **Datasets**: dataset items are copied as examples. Experiments, dataset runs, scores
+  and dataset versions are not migrated.
+- **Traces**: only the most recent `NUM_TRACES_TO_REPLAY` traces are replayed, and the
+  default is 0. Models, token usage, cost and the session ID are mapped. Scores are not
+  migrated and runs get new IDs. For a full history use Langfuse's blob storage export,
+  or keep Langfuse read-only after cutover.
+- Not covered: evaluators, annotation queues, users and roles, API keys.
+
 ## Runbooks (Notebooks)
 
 Each provider has a runbook covering resource migration and updating application
