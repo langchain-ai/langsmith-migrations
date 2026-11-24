@@ -180,6 +180,54 @@ def _get_attr(obj, names: list[str]):
     return None
 
 
+def _provider_from_model(model: str) -> str:
+    m = (model or "").lower()
+    if any(x in m for x in ("claude", "anthropic")):
+        return "anthropic"
+    if any(x in m for x in ("gpt", "openai", "o1", "o3", "o4", "text-embedding")):
+        return "openai"
+    if any(x in m for x in ("gemini", "google")):
+        return "google"
+    return "unknown"
+
+
+def _first_number(d: dict, keys: list[str]):
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return v
+    return None
+
+
+def _usage_metadata(obs) -> dict | None:
+    """Map a Langfuse generation's token usage and cost to LangSmith usage_metadata."""
+    usage = {}
+    for field in ("usageDetails", "usage_details", "usage"):
+        v = _to_plain(_get_attr(obs, [field]))
+        if isinstance(v, dict) and v:
+            usage = v
+            break
+    out: dict = {}
+    inp = _first_number(usage, ["input", "promptTokens", "input_tokens"])
+    outp = _first_number(usage, ["output", "completionTokens", "output_tokens"])
+    total = _first_number(usage, ["total", "totalTokens", "total_tokens"])
+    if inp is not None:
+        out["input_tokens"] = inp
+    if outp is not None:
+        out["output_tokens"] = outp
+    if total is not None:
+        out["total_tokens"] = total
+    for ls_key, lf_keys in (
+        ("input_cost", ["calculatedInputCost", "inputCost"]),
+        ("output_cost", ["calculatedOutputCost", "outputCost"]),
+        ("total_cost", ["calculatedTotalCost", "totalCost"]),
+    ):
+        v = _get_attr(obs, lf_keys)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[ls_key] = v
+    return out or None
+
+
 def map_langfuse_to_langsmith(source_trace):
     runs: list[dict] = []
     # Root
@@ -199,6 +247,12 @@ def map_langfuse_to_langsmith(source_trace):
         "status": "completed",
         "parent_run_id": None,
     }
+    # LangSmith groups runs into threads by a session_id / thread_id metadata key,
+    # which has to be on every run of the trace.
+    session_id = _get_attr(source_trace, ['session_id', 'sessionId'])
+    root["metadata"] = dict(root["metadata"])
+    if session_id:
+        root["metadata"]["session_id"] = str(session_id)
     runs.append(root)
     # Children: two-pass to preserve nesting (parent before child lookup)
     obs_list = _get_attr(source_trace, ['observations']) or []
@@ -234,10 +288,21 @@ def map_langfuse_to_langsmith(source_trace):
             "end_time": safe_isoformat(_get_attr(obs, ['end_time','endTime'])) if _get_attr(obs, ['end_time','endTime']) else None,
             "status": "completed",
         }
-        if run_type == "llm" and _get_attr(obs, ['model']):
-            model_lower = str(_get_attr(obs, ['model'])).lower()
-            run.setdefault("metadata", {})
-            run["metadata"]["ls_provider"] = "openai" if "openai" in model_lower else ("anthropic" if "anthropic" in model_lower or "claude" in model_lower else ("google" if "google" in model_lower else "unknown"))
+        run["metadata"] = dict(run["metadata"])
+        if session_id:
+            run["metadata"]["session_id"] = str(session_id)
+        if run_type == "llm":
+            model = _get_attr(obs, ['model'])
+            if model:
+                # ls_model_name is what LangSmith uses to price the run
+                run["metadata"]["ls_model_name"] = str(model)
+                run["metadata"]["ls_provider"] = _provider_from_model(str(model))
+            usage_md = _usage_metadata(obs)
+            if usage_md:
+                if run["outputs"] is None:
+                    run["outputs"] = {}
+                if isinstance(run["outputs"], dict):
+                    run["outputs"]["usage_metadata"] = usage_md
         runs.append(run)
     # Finish: end times + dotted order
     _ensure_end_times(runs)
@@ -255,6 +320,8 @@ def fetch_and_transform_traces(workspace_id: str, sleep_between_gets=0.7, max_re
     except Exception:
         max_traces = None
 
+    if max_traces == 0:
+        print("        ! NUM_TRACES_TO_REPLAY is 0 (or unset), so no traces will be replayed. Set it in .env.")
     page = 1
     limit = 50
     total_processed = 0
