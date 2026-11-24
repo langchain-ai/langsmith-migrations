@@ -44,6 +44,17 @@ def ls_upload_examples(workspace_id: str, dataset_id: str, examples: list[dict])
         ).raise_for_status()
 
 
+def _ls_client(workspace_id: str, pat: Optional[str] = None) -> Client:
+    session = requests.Session()
+    session.headers.update({"X-Tenant-Id": workspace_id})
+    return Client(api_key=pat or LS_API_KEY, api_url=f"{LS_BASE}/api/v1", session=session)
+
+
+def ls_prompt_exists(name: str, workspace_id: str) -> bool:
+    """True if a prompt with this name already exists in the workspace."""
+    return _ls_client(workspace_id).get_prompt(name) is not None
+
+
 def ls_push_prompt(
     name: str,
     description: str,
@@ -52,19 +63,62 @@ def ls_push_prompt(
     pat: Optional[str] = None,
 ) -> str:
     """Create/Update a prompt (+model) in the given workspace; return URL."""
-    pat = pat or LS_API_KEY
-    session = requests.Session()
-    session.headers.update({"X-Tenant-Id": workspace_id})
-    client = Client(api_key=pat, api_url=f"{LS_BASE}/api/v1", session=session)
-    
+    return _ls_client(workspace_id, pat).push_prompt(
+        name,
+        object=prompt_obj,
+        description=description,
+    )
+
+
+def ls_push_prompt_version(
+    name: str,
+    description: str,
+    prompt_obj: object,
+    workspace_id: str,
+    tags: Optional[list[str]] = None,
+    commit_tags: Optional[list[str]] = None,
+    commit_description: Optional[str] = None,
+) -> tuple[str, list[str], list[str]]:
+    """Add one commit to a prompt (creating the prompt if needed), then tag it.
+
+    tags are prompt-level tags. commit_tags are applied to the new commit, one at a
+    time and best effort: a tag LangSmith refuses (for example a reserved one) is
+    reported, and does not stop the migration or leave the commit untagged by the
+    others. Returns (url, applied_tags, failed_tags).
+    """
+    client = _ls_client(workspace_id)
     url = client.push_prompt(
         name,
         object=prompt_obj,
         description=description,
-        # metadata & input vars not yet supported in SDK call → store via tags
+        tags=tags,
+        commit_description=commit_description,
     )
-    return url
+    applied: list[str] = []
+    failed: list[str] = []
+    if not commit_tags:
+        return url, applied, failed
 
+    # The URL ends in the first 8 characters of the new commit's hash.
+    short_hash = url.split("?")[0].rstrip("/").split("/")[-1]
+    commit = next(
+        (
+            c
+            for c in client.list_prompt_commits(name, limit=10)
+            if (c.commit_hash or "").startswith(short_hash)
+        ),
+        None,
+    )
+    if commit is None:
+        return url, applied, list(commit_tags)
+    for tag in commit_tags:
+        try:
+            # No public SDK method tags an existing commit yet.
+            client._create_commit_tags(f"{commit.owner}/{commit.repo}", commit.id, tag)
+            applied.append(tag)
+        except Exception:
+            failed.append(tag)
+    return url, applied, failed
 
 
 def ls_replay_runs_sdk(workspace_id: str, runs: list[dict], project_name: str = None):
@@ -156,4 +210,3 @@ def ls_replay_runs_sdk(workspace_id: str, runs: list[dict], project_name: str = 
             source=fb.get("source"),
             metadata=fb.get("metadata") or {},
         )
-
