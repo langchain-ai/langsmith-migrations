@@ -1,29 +1,24 @@
-import re
-import json
 import traceback
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableSequence
-from langsmith.utils import LangSmithConflictError
 
-from utils.langfuse import lf_get_project_prompts
-from utils.langsmith import ls_push_prompt
+from utils.langfuse import lf_get_prompt_history
+from utils.langsmith import ls_prompt_exists, ls_push_prompt_version
 from config import INCLUDE_MODEL_IN_PROMPTS
 
+# Langfuse adds this label itself to the newest version. It is not a deployment
+# label, so it is not carried over as a LangSmith commit tag.
+_AUTO_LABELS = {"latest"}
 
-
-def string_to_chat_template(template: str) -> ChatPromptTemplate:
-    """Detect 'role: content' lines and build a ChatPromptTemplate; fall back."""
-    lines = [l.strip() for l in template.splitlines() if l.strip()]
-    pairs: list[tuple[str, str]] = []
-    for line in lines:
-        m = re.match(r"^(system|user|assistant|tool):\s*(.*)$", line, re.I)
-        if m:
-            pairs.append((m.group(1).lower(), m.group(2)))
-    if pairs:
-        return ChatPromptTemplate.from_messages(pairs)
-    return ChatPromptTemplate.from_template(template)
+# Langfuse chat roles -> LangChain message roles.
+_ROLE_MAP = {
+    "system": "system",
+    "developer": "system",
+    "user": "human",
+    "human": "human",
+    "assistant": "ai",
+    "ai": "ai",
+}
 
 
 def detect_model_provider(model_name: str) -> str:
@@ -65,123 +60,140 @@ def get_model_instance(model_name: str, model_params: dict = None):
     params.pop("model", None)
     params.pop("supported_languages", None)
 
+    # Imported here so that prompts can be migrated without the provider
+    # packages when INCLUDE_MODEL_IN_PROMPTS=false.
     if provider == "anthropic":
-        # Anthropic models
+        from langchain_anthropic import ChatAnthropic
+
         return ChatAnthropic(model=model_name, **params)
-    else:
-        # OpenAI models (default)
-        # Note: ChatOpenAI uses 'model' parameter, not 'model_name'
-        return ChatOpenAI(model=model_name, **params)
+
+    from langchain_openai import ChatOpenAI
+
+    # ChatOpenAI uses 'model' parameter, not 'model_name'
+    return ChatOpenAI(model=model_name, **params)
 
 
-def langfuse_prompt_conversion(lf_prompt: dict) -> dict:
+def langsmith_prompt_name(lf_name: str) -> str:
+    """Name a Langfuse prompt gets in LangSmith.
+
+    Lowercased, spaces become hyphens. Langfuse folder names ("team/prompt") use
+    "/", which LangSmith reads as owner/name, so it becomes "-" too.
     """
-    Map Langfuse prompt JSON → dict ready for push_langsmith_prompt().
+    return str(lf_name).lower().replace(" ", "-").replace("/", "-")
+
+
+def build_chat_prompt(lf_prompt: dict) -> ChatPromptTemplate:
+    """Build a LangSmith-ready ChatPromptTemplate from one Langfuse prompt version.
+
+    - Every line of every message is kept (the previous string round trip dropped
+      any line that did not start with "role:").
+    - Langfuse's {{variable}} syntax is kept as is. LangSmith supports mustache
+      templates, so literal braces such as JSON examples stay literal.
+    - Chat placeholders become optional MessagesPlaceholders.
     """
-    # Prefer direct fields from v2 detail; fallback to nested versions if present
-    pv = lf_prompt.get("latest_version", {}) or lf_prompt.get("current_version", {})
+    raw = lf_prompt.get("prompt")
+    messages: list = []
 
-    # Description
-    description = (
-        lf_prompt.get("description")
-        or pv.get("description")
-        or ""
-    )
-
-    # Model and params (if provided). In v2, config may live top-level.
-    config = (lf_prompt.get("config") or pv.get("config") or {}) or {}
-    model = config.get("model") or pv.get("model") or ""
-    model_params = config if isinstance(config, dict) else {}
-
-    # Build template string
-    prompt_template = ""
-    # v2: top-level prompt can be a list of messages
-    if isinstance(lf_prompt.get("prompt"), list):
-        msgs = [f"{m.get('role','user')}: {m.get('content','')}" for m in lf_prompt.get("prompt", [])]
-        prompt_template = "\n\n".join(msgs)
-    elif isinstance(lf_prompt.get("prompt"), str):
-        prompt_template = lf_prompt["prompt"]
-    elif isinstance(pv.get("messages"), list):
-        msgs = [f"{m.get('role','user')}: {m.get('content','')}" for m in pv.get("messages", [])]
-        prompt_template = "\n\n".join(msgs)
-    elif isinstance(pv.get("prompt"), str):
-        prompt_template = pv.get("prompt")
+    if isinstance(raw, str):
+        messages.append(("human", raw))
+    elif isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "placeholder":
+                messages.append(MessagesPlaceholder(item["name"], optional=True))
+                continue
+            role = _ROLE_MAP.get(str(item.get("role", "user")).lower())
+            if role is None:
+                print(
+                    f"       ! unknown role '{item.get('role')}' in prompt "
+                    f"'{lf_prompt.get('name')}', treating it as 'human'"
+                )
+                role = "human"
+            messages.append((role, item.get("content", "")))
     else:
-        # Last resort: dump object for visibility
-        prompt_template = json.dumps(lf_prompt)
+        raise ValueError(
+            f"prompt '{lf_prompt.get('name')}' version {lf_prompt.get('version')} "
+            "has no text or chat content"
+        )
 
-    # Normalize mustache variants to {var}
-    tpl = prompt_template
-    tpl = re.sub(r"\{\{\{(\w+)\}\}\}", r"{\1}", tpl)
-    tpl = re.sub(r"\{\{(\w+)\}\}", r"{\1}", tpl)
-
-    # Detect variables after normalization
-    var_pat = re.findall(r"\{(\w+)\}", tpl)
-
-    # Name → lowercase, spaces to hyphens, robust to missing keys
-    raw_name = lf_prompt.get("name") or lf_prompt.get("slug") or f"prompt-{lf_prompt.get('id','')}"
-    name = str(raw_name).lower().replace(" ", "-")
-
-    out: dict = {
-        "name": name,
-        "description": description,
-        "prompt_template": tpl,
-        "input_variables": list(sorted(set(var_pat))),
-        "metadata": {
-            "langfuse_id": lf_prompt.get("id"),
-            "langfuse_labels": lf_prompt.get("labels", []),
-            "langfuse_tags": lf_prompt.get("tags", []),
-            "created": lf_prompt.get("createdAt") or lf_prompt.get("created_at") or lf_prompt.get("created"),
-            "type": lf_prompt.get("type") or pv.get("type"),
-            "version": lf_prompt.get("version") or pv.get("version"),
-            "model": model,
-            "model_params": model_params,
-            "original_source": "langfuse",
-        },
-    }
-    return out
+    return ChatPromptTemplate.from_messages(messages, template_format="mustache")
 
 
-def prompt_dict_to_obj(prompt_dict: dict, include_model: bool = True) -> object:
-    chat_prompt = string_to_chat_template(prompt_dict["prompt_template"])
-    model_name = prompt_dict["metadata"].get("model")
-    model_params = prompt_dict["metadata"].get("model_params", {})
+def prompt_to_obj(lf_prompt: dict, include_model: bool = True) -> object:
+    """Prompt object to push: the template alone, or template | model."""
+    chat_prompt = build_chat_prompt(lf_prompt)
+    config = lf_prompt.get("config") or {}
+    model_name = config.get("model") if isinstance(config, dict) else None
 
     if model_name and include_model:
         try:
-            model = get_model_instance(model_name, model_params)
-            obj = RunnableSequence(chat_prompt, model)
-            provider = detect_model_provider(model_name)
-            print(f"       ... using {provider} model: {model_name}")
+            model = get_model_instance(model_name, config)
+            print(f"       ... using {detect_model_provider(model_name)} model: {model_name}")
+            return RunnableSequence(chat_prompt, model)
         except Exception as e:
-            print(
-                f"       ! failed to create model {model_name}, using prompt only: {e}"
-            )
-            obj = chat_prompt
-    else:
-        if model_name and not include_model:
-            print(f"       • prompt only (model {model_name} excluded by flag)")
-        obj = chat_prompt
-    return obj
+            print(f"       ! failed to create model {model_name}, using prompt only: {e}")
+    elif model_name:
+        print(f"       • prompt only (model {model_name} excluded by flag)")
+    return chat_prompt
 
 
 def migrate_prompts(workspace_id: str, project_id: str):
-    prompts = lf_get_project_prompts(project_id)
-    if prompts:
-        print(f"    - migrating {len(prompts)} prompt(s)…")
-        for lf_p in prompts:
-            try:
-                ls_p_dict = langfuse_prompt_conversion(lf_p)
-                ls_p_obj = prompt_dict_to_obj(ls_p_dict, include_model=INCLUDE_MODEL_IN_PROMPTS)
-                url = ls_push_prompt(ls_p_dict["name"], ls_p_dict["description"], ls_p_obj, workspace_id)
-                pname_disp = lf_p.get("name") or lf_p.get("slug") or lf_p.get("id")
-                print(f"       • {pname_disp}  →  {url}")
-            except Exception as e:
-                pname_disp = lf_p.get("name") or lf_p.get("slug") or lf_p.get("id")
-                if isinstance(e, LangSmithConflictError):
-                    print(f"       • prompt '{pname_disp}' already exists, skipping...")
-                    continue
-                print(f"       x prompt '{pname_disp}' failed: {e}")
-                traceback.print_exc()
-    else:
+    """Migrate every version of every prompt, oldest first, so LangSmith ends up
+    with the same commit history. Langfuse labels become commit tags.
+
+    A prompt that already exists in LangSmith is skipped, so the script can be
+    re-run without adding duplicate commits.
+    """
+    history = lf_get_prompt_history(project_id)
+    if not history:
         print("    (no prompts)")
+        return
+
+    print(f"    - migrating {len(history)} prompt(s)…")
+    for entry in history:
+        lf_name = entry["name"]
+        ls_name = langsmith_prompt_name(lf_name)
+        try:
+            if entry.get("failed_versions"):
+                print(
+                    f"       x prompt '{lf_name}' skipped: could not fetch "
+                    f"version(s) {entry['failed_versions']}; migrating the rest would leave gaps in its history"
+                )
+                continue
+            if ls_prompt_exists(ls_name, workspace_id):
+                print(f"       • prompt '{lf_name}' already exists as '{ls_name}', skipping...")
+                continue
+
+            versions = sorted(entry["versions"], key=lambda v: v.get("version") or 0)
+            for lf_p in versions:
+                number = lf_p.get("version")
+                labels = [l for l in (lf_p.get("labels") or []) if l not in _AUTO_LABELS]
+                obj = prompt_to_obj(lf_p, include_model=INCLUDE_MODEL_IN_PROMPTS)
+                message = lf_p.get("commitMessage") or ""
+                url, applied, failed_tags = ls_push_prompt_version(
+                    ls_name,
+                    lf_p.get("description") or "",
+                    obj,
+                    workspace_id,
+                    tags=lf_p.get("tags") or None,
+                    commit_tags=labels or None,
+                    commit_description=(
+                        f"Migrated from Langfuse version {number}"
+                        + (f": {message}" if message else "")
+                    )[:1000],
+                )
+                print(f"       • {lf_name} v{number} (tags: {applied or 'none'})  →  {url}")
+                if failed_tags:
+                    print(
+                        f"         ! could not apply tag(s) {failed_tags} to this commit. "
+                        "staging and production are reserved tags in LangSmith: set them by "
+                        "promoting the commit in the UI."
+                    )
+            print(f"         {lf_name}  =>  LangSmith prompt '{ls_name}'")
+        except Exception as e:
+            print(
+                f"       x prompt '{lf_name}' failed: {e}\n"
+                f"         If '{ls_name}' was partly created in LangSmith, delete it before re-running."
+            )
+            traceback.print_exc()
