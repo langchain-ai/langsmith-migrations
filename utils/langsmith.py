@@ -113,7 +113,11 @@ def ls_push_prompt_version(
             ),
             None,
         )
-    except LangSmithConflictError:
+    except LangSmithConflictError as e:
+        # 409 also means a stale parent commit or two pushes racing; only
+        # "Nothing to commit" means this version equals the previous commit.
+        if "Nothing to commit" not in str(e):
+            raise
         unchanged = True
         commit = next(iter(client.list_prompt_commits(name, limit=1)), None)
         short_hash = (commit.commit_hash or "")[:8] if commit else "?"

@@ -13,7 +13,7 @@ from unittest import mock
 from langsmith.utils import LangSmithConflictError
 
 from providers.langfuse.data import prompts, traces
-from providers.langfuse.data.prompts import build_chat_prompt, langsmith_prompt_name
+from providers.langfuse.data.prompts import build_chat_prompt, dotted_variables, langsmith_prompt_name
 from providers.langfuse.data.traces import (
     _fit_into_ingest_window,
     _usage_metadata,
@@ -194,6 +194,15 @@ class CommitTagsTest(unittest.TestCase):
         self.assertEqual((url, applied, failed), ("p:0123abcd", ["staging"], []))
         self.assertEqual(client._create_commit_tags.call_args.args[1], str(previous.id))
 
+    def test_other_conflicts_are_raised(self):
+        client = mock.Mock()
+        client.push_prompt.side_effect = LangSmithConflictError(
+            "409 Parent commit validation failed: reference ID x")
+        with mock.patch.object(ls_utils, "_ls_client", return_value=client):
+            with self.assertRaises(LangSmithConflictError):
+                ls_utils.ls_push_prompt_version("p", "", object(), "ws", commit_tags=["staging"])
+        client._create_commit_tags.assert_not_called()
+
 
 class PromptConversionTest(unittest.TestCase):
     def test_variable_values_are_not_html_escaped(self):
@@ -205,6 +214,13 @@ class PromptConversionTest(unittest.TestCase):
         self.assertEqual(msgs[1].content, f"ctx: {value}")
         text = build_chat_prompt({"prompt": "{{a}} and {{{b}}} {{#s}}x{{/s}}"})
         self.assertEqual(text.messages[0].prompt.template, "{{{a}}} and {{{b}}} {{#s}}x{{/s}}")
+        hyphen = build_chat_prompt({"prompt": "Hi {{user-name}}"})
+        self.assertEqual(hyphen.invoke({"user-name": "A&B"}).to_messages()[0].content, "Hi A&B")
+
+    def test_dotted_variables_are_reported(self):
+        self.assertEqual(dotted_variables({"prompt": [{"role": "user", "content": "{{user.name}} {{q}}"}]}),
+                         ["user.name"])
+        self.assertEqual(dotted_variables({"prompt": "{{q}}"}), [])
 
     def test_prompt_names(self):
         self.assertEqual(langsmith_prompt_name("Team/Summarize.v2"), "team-summarize-v2")

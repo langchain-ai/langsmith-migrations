@@ -53,6 +53,9 @@ What the Langfuse migration does and does not carry over:
   example a re-publish) adds no commit; its labels go on the previous commit.
   Prompts use the mustache format. Variables become `{{{variable}}}` so values are
   inserted as given, as in Langfuse (mustache's `{{variable}}` would HTML-escape them).
+  A variable with a `.` in its name, such as `{{user.name}}`, is read by mustache as a
+  nested lookup, so pass `{"user": {"name": ...}}` or rename it; the script warns
+  about these.
   Chat placeholders become optional message placeholders. Prompt names are lowercased
   and any character other than letters, digits, `-` and `_` becomes `-`; the script
   prints each Langfuse name next to its LangSmith name, and skips a prompt whose

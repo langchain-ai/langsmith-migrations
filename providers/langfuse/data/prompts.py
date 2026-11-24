@@ -86,9 +86,20 @@ def langsmith_prompt_name(lf_name: str) -> str:
     return name or "prompt"
 
 
-# A Langfuse variable, {{name}}, not already a triple-brace or a mustache tag
-# such as {{#section}}.
-_LF_VARIABLE = re.compile(r"(?<!\{)\{\{\s*([A-Za-z_]\w*)\s*\}\}(?!\})")
+# A Langfuse variable, {{name}} (Langfuse allows e.g. "user-name"), not already a
+# triple-brace or a mustache tag such as {{#section}} or {{/section}}.
+_LF_VARIABLE = re.compile(r"(?<!\{)\{\{\s*([A-Za-z_][\w.-]*)\s*\}\}(?!\})")
+
+
+def dotted_variables(lf_prompt: dict) -> list[str]:
+    """Variables with a "." in the name. Langfuse fills {{user.name}} from a
+    variable named "user.name"; mustache reads it as user -> name, so callers
+    must pass {"user": {"name": ...}} instead."""
+    raw = lf_prompt.get("prompt")
+    texts = [raw] if isinstance(raw, str) else [
+        m.get("content", "") for m in (raw or []) if isinstance(m, dict)
+    ]
+    return sorted({n for t in texts if isinstance(t, str) for n in _LF_VARIABLE.findall(t) if "." in n})
 
 
 def _unescaped_variables(text: str) -> str:
@@ -215,6 +226,12 @@ def migrate_prompts(workspace_id: str, project_id: str):
                 print(f"       • {lf_name} v{number} ({note}tags: {applied or 'none'})  →  {url}")
                 for tag, reason in failed_tags:
                     print(f"         ! could not apply tag '{tag}' to this commit: {reason}")
+                dotted = dotted_variables(lf_p)
+                if dotted:
+                    print(
+                        f"         ! variable(s) {dotted} contain '.', which LangSmith (mustache) reads as "
+                        "a nested lookup: pass {\"user\": {\"name\": ...}} for {{user.name}}, or rename them"
+                    )
             print(f"         {lf_name}  =>  LangSmith prompt '{ls_name}'")
         except Exception as e:
             print(
