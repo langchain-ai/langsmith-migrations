@@ -80,37 +80,46 @@ What the Langfuse migration does and does not carry over:
 ### Updating application code: fetching prompts
 
 After the prompts are migrated, change the runtime calls that fetch and fill them.
-The Langfuse calls below are from the Langfuse Python SDK; check them against the
-version you run.
+Checked against Langfuse Python SDK 5.2 and LangSmith SDK 0.16.
 
 | Langfuse | LangSmith | Notes |
 | --- | --- | --- |
 | Prompt name | Prompt name | Names are normalized on migration; the script prints each mapping. |
 | Prompt version | Commit | All versions migrate, oldest first. |
 | Label (`production`, `staging`, custom) | Commit tag with the same name | The automatic `latest` label is not tagged. |
-| `get_prompt("name")` | `client.pull_prompt("name")` | Returns the latest commit. |
-| `get_prompt("name", label="production")` | `client.pull_prompt("name:production")` | `name:<tag>` pins a tag. |
-| `get_prompt("name", version=3)` | `client.pull_prompt("name:<commit-hash>")` | LangSmith pins by commit hash, not an integer version. |
-| `prompt.compile(var="x")` | `prompt.invoke({"var": "x"})` | `pull_prompt` returns a LangChain prompt object. |
+| `get_prompt("name")` | `client.pull_prompt("name:production")` | Langfuse's default is the `production` version, not the newest. |
+| `get_prompt("name", label="latest")` | `client.pull_prompt("name")` | No tag returns the newest commit. |
+| `get_prompt("name", label="staging")` | `client.pull_prompt("name:staging")` | `name:<tag>` pins a tag. |
+| `get_prompt("name", version=3)` | `client.pull_prompt("name:<commit-hash>")` | Integer versions do not resolve (404). Each commit's description says `Migrated from Langfuse version N`; the first 8 characters of the hash are enough. |
+| `prompt.compile(var="x")` on a chat prompt | `prompt.invoke({"var": "x"}).to_messages()` | LangChain messages; the roles `user` and `assistant` are `human` and `ai`. |
+| `prompt.compile(var="x")` on a text prompt | `prompt.invoke({"var": "x"}).to_messages()[0].content` | A text prompt is migrated as a chat prompt with one human message. `.to_string()` would prefix `Human: `. |
 
 ```python
 from langsmith import Client
 
 client = Client()
 
-# Latest commit, or pin a tag or commit hash with "name:production" / "name:<hash>"
+# Same version as Langfuse's get_prompt("movie-critic-chat"); "name:<hash>" pins a commit
 prompt = client.pull_prompt("movie-critic-chat:production")
 
 # Fill the variables. A chat prompt returns its messages.
 messages = prompt.invoke({"criticlevel": "harsh", "movie": "Alien"}).to_messages()
 ```
 
-- `pull_prompt` caches. Pass `skip_cache=True` when a service must see a new commit
+- `pull_prompt` caches each prompt for 5 minutes and keeps returning the cached commit
+  until a background refresh replaces it, so a new commit, or a tag moved to another
+  commit, can take about 6 minutes to reach a running service. Pass `skip_cache=True`,
+  or create the client with `Client(disable_prompt_cache=True)`, where it must show up
   immediately.
-- Migrated prompts use the mustache format, so variables are written `{{{variable}}}`.
-  A prompt you create fresh with `ChatPromptTemplate` uses `{variable}` unless you set
-  the format.
-- Chat placeholders are optional. Pass an empty list when you have no history.
+- Variable values are inserted as given, as in Langfuse: `<`, `>`, `&` and quotes are
+  not escaped, and literal JSON braces in the prompt stay literal. Migrated prompts use
+  the mustache format, so variables are written `{{{variable}}}`. A prompt you create
+  fresh with `ChatPromptTemplate` uses `{variable}` unless you set the format.
+- A variable with a `.` in its name, `{{user.name}}`, is filled from a nested dict:
+  `{"user": {"name": "Ana"}}`. Langfuse's flat key `{"user.name": "Ana"}` raises a
+  missing-variable error.
+- Chat placeholders are optional: omit the key or pass `[]` when there is no history.
+  (Langfuse's `compile()` leaves an unresolved placeholder in the output instead.)
 - If you keep one workspace per environment, plain `pull_prompt("name")` already
   returns that environment's latest commit, so tags are only needed within a workspace.
 
