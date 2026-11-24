@@ -119,6 +119,64 @@ def lf_get_prompt_history(project_id: str) -> list[dict]:
     return history
 
 
+# Field groups of GET /api/public/v2/observations needed to rebuild a trace.
+_OBSERVATION_FIELDS = "core,basic,time,io,metadata,model,usage,prompt,trace_context"
+
+
+def lf_iter_observations(**params):
+    """Yield observations from GET /api/public/v2/observations, following the cursor.
+
+    Langfuse v4 reads traces through this endpoint; the v3 /api/public/traces
+    endpoints are removed on Langfuse Cloud (410 Gone since 2026-11-16).
+    Results come newest first.
+    """
+    cursor = None
+    while True:
+        query = dict(params)
+        if cursor:
+            query["cursor"] = cursor
+        page = lf_get("/api/public/v2/observations", **query)
+        rows = page.get("data") or []
+        yield from rows
+        cursor = (page.get("meta") or {}).get("cursor")
+        if not cursor or not rows:
+            return
+
+
+def lf_supports_observations_v2() -> bool:
+    """False on Langfuse servers that predate the v2 observations API (404)."""
+    try:
+        lf_get("/api/public/v2/observations", limit=1)
+        return True
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return False
+        raise
+
+
+def lf_recent_trace_ids(max_traces: int | None) -> list[str]:
+    """IDs of the most recent traces, newest first, found through their root observations."""
+    ids: list[str] = []
+    seen: set[str] = set()
+    for obs in lf_iter_observations(isRootObservation="true", fields="core", limit=1000):
+        tid = obs.get("traceId")
+        if tid and tid not in seen:
+            seen.add(tid)
+            ids.append(tid)
+            if max_traces is not None and len(ids) >= max_traces:
+                break
+    return ids
+
+
+def lf_get_trace_observations(trace_id: str) -> list[dict]:
+    """Every observation of one trace, with input/output, usage, model and trace context."""
+    return list(
+        lf_iter_observations(
+            traceId=trace_id, fields=_OBSERVATION_FIELDS, limit=1000
+        )
+    )
+
+
 def lf_get_project_datasets(
     project_id: str
 ) -> dict[str, list[dict]]:
