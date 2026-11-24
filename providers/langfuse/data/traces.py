@@ -279,7 +279,10 @@ def _parse_ts(val) -> dt.datetime | None:
 
 
 def _rebase_times(runs: list[dict], new_start: dt.datetime):
-    """Shift every run of a trace so the root starts at new_start, keeping durations."""
+    """Shift every run of a trace so the root starts at new_start, keeping durations.
+
+    Call _assign_dotted_order afterwards: dotted order encodes start times.
+    """
     root_start = _parse_ts(runs[0].get("start_time"))
     if root_start is None:
         return
@@ -291,13 +294,31 @@ def _rebase_times(runs: list[dict], new_start: dt.datetime):
                 r[key] = safe_isoformat(t + shift)
 
 
-def map_langfuse_to_langsmith(source_trace, rebase_to: dt.datetime | None = None):
-    """Convert one Langfuse trace to LangSmith runs.
+def _trace_duration(runs: list[dict]) -> dt.timedelta:
+    start = _parse_ts(runs[0].get("start_time"))
+    ends = [t for t in (_parse_ts(r.get("end_time")) for r in runs) if t is not None]
+    if start is None or not ends:
+        return dt.timedelta(0)
+    return max(max(ends) - start, dt.timedelta(0))
 
-    rebase_to moves the whole trace so its root starts at that time (LangSmith
-    only ingests runs that start within 24 hours of now); the original start time
-    is kept in the root run's metadata as langfuse_start_time.
+
+def _fit_into_ingest_window(traces_runs: list[list[dict]], now: dt.datetime):
+    """Move traces (oldest first) onto a timeline that ends a minute before now.
+
+    LangSmith only ingests runs that start within 24 hours of now. Traces keep
+    their order and durations, one second apart, and none ends in the future.
+    The original start time stays in metadata.langfuse_start_time.
     """
+    cursor = now - dt.timedelta(seconds=60)
+    for runs in reversed(traces_runs):
+        new_start = cursor - _trace_duration(runs)
+        _rebase_times(runs, new_start)
+        _assign_dotted_order(runs, runs[0]["id"])
+        cursor = new_start - dt.timedelta(seconds=1)
+
+
+def map_langfuse_to_langsmith(source_trace):
+    """Convert one Langfuse trace to LangSmith runs (the root run first)."""
     runs: list[dict] = []
     # Root
     new_root_id = str(uuid.uuid4())
@@ -346,7 +367,7 @@ def map_langfuse_to_langsmith(source_trace, rebase_to: dt.datetime | None = None
             outputs = _to_messages(outputs, default_role="assistant")
         parent_obs_id = _get_attr(obs, ['parent_observation_id','parentObservationId'])
         # Unknown parents (e.g. the root span folded into the trace) attach to the root run.
-        parent_run_id = obs_id_to_run_id.get(str(parent_obs_id)) or root["id"] if parent_obs_id else root["id"]
+        parent_run_id = (obs_id_to_run_id.get(str(parent_obs_id)) or root["id"]) if parent_obs_id else root["id"]
         run = {
             "id": run_id,
             "trace_id": root["id"],
@@ -386,8 +407,6 @@ def map_langfuse_to_langsmith(source_trace, rebase_to: dt.datetime | None = None
     if root.get("start_time"):
         root["metadata"]["langfuse_start_time"] = root["start_time"]
     _ensure_end_times(runs)
-    if rebase_to is not None:
-        _rebase_times(runs, rebase_to)
     _assign_dotted_order(runs, root["id"])
     return runs
 
@@ -533,8 +552,8 @@ def fetch_and_transform_traces(workspace_id: str, sleep_between_gets=0.7, max_re
         sources.append(source)
 
     # LangSmith rejects runs that start more than 24 hours from now. If any trace
-    # is older than that, lay the whole batch out on a compressed timeline ending
-    # now (one second apart, oldest first) so order and session turn order hold.
+    # is older than that, the whole batch is moved onto a compressed timeline
+    # ending now (see _fit_into_ingest_window), so order and session turns hold.
     def _start(s):
         return _parse_ts(_get_attr(s, ['timestamp', 'start_time', 'startTime'])) or dt.datetime.now(dt.timezone.utc)
 
@@ -548,18 +567,17 @@ def fetch_and_transform_traces(workspace_id: str, sleep_between_gets=0.7, max_re
             "durations kept; the original time is in metadata.langfuse_start_time)"
         )
 
-    accumulated_runs: list[dict] = []
-    for i, source in enumerate(sources):
-        tid = _get_attr(source, ['id'])
-        new_start = now - dt.timedelta(seconds=len(sources) - i + 60) if rebase else None
+    mapped: list[list[dict]] = []
+    for source in sources:
         try:
-            runs_batch = map_langfuse_to_langsmith(source, rebase_to=new_start)
+            mapped.append(map_langfuse_to_langsmith(source))
         except Exception as e:
-            print(f"        ! couldn't convert trace {tid}: {e}")
+            print(f"        ! couldn't convert trace {_get_attr(source, ['id'])}: {e}")
             total_failed_transform += 1
-            continue
-        accumulated_runs.extend(runs_batch)
-        total_processed += 1
+    if rebase:
+        _fit_into_ingest_window(mapped, now)
+    accumulated_runs = [run for runs in mapped for run in runs]
+    total_processed = len(mapped)
 
     if accumulated_runs:
         try:

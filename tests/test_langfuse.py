@@ -10,8 +10,12 @@ import uuid
 from types import SimpleNamespace
 from unittest import mock
 
-from providers.langfuse.data import traces
+from langsmith.utils import LangSmithConflictError
+
+from providers.langfuse.data import prompts, traces
+from providers.langfuse.data.prompts import build_chat_prompt, langsmith_prompt_name
 from providers.langfuse.data.traces import (
+    _fit_into_ingest_window,
     _usage_metadata,
     map_langfuse_to_langsmith,
     trace_from_observations,
@@ -110,14 +114,20 @@ class TraceFromObservationsTest(unittest.TestCase):
         runs = map_langfuse_to_langsmith(trace_from_observations(failed))
         self.assertEqual([r["error"] for r in runs], ["429 rate limited"] * 2)
 
-    def test_rebase_keeps_durations_and_original_time(self):
-        new_start = dt.datetime(2026, 11, 24, 12, 0, tzinfo=dt.timezone.utc)
-        runs = map_langfuse_to_langsmith(trace_from_observations(V2_TRACE), rebase_to=new_start)
-        root, llm = runs
-        self.assertEqual(root["start_time"], "2026-11-24T12:00:00.000Z")
-        self.assertEqual(llm["start_time"], "2026-11-24T12:00:00.100Z")
-        self.assertEqual(llm["end_time"], "2026-11-24T12:00:02.000Z")
-        self.assertEqual(root["metadata"]["langfuse_start_time"], "2026-11-20T10:00:00.000Z")
+    def test_ingest_window_keeps_order_durations_and_ends_before_now(self):
+        long_trace = [dict(o, traceId="t2", startTime=o["startTime"].replace("10:00", "11:00"),
+                           endTime="2026-11-20T11:05:00.000Z") for o in V2_TRACE]
+        batch = [map_langfuse_to_langsmith(trace_from_observations(t)) for t in (V2_TRACE, long_trace)]
+        now = dt.datetime(2026, 11, 24, 12, 0, tzinfo=dt.timezone.utc)
+        _fit_into_ingest_window(batch, now)
+        ts = lambda v: dt.datetime.fromisoformat(v.replace("Z", "+00:00"))
+        (root1, llm1), (root2, _) = batch
+        self.assertLessEqual(ts(root2["end_time"]), now)          # 5-minute trace ends in the past
+        self.assertEqual(ts(root2["end_time"]) - ts(root2["start_time"]), dt.timedelta(minutes=5))
+        self.assertLess(ts(root1["end_time"]), ts(root2["start_time"]))  # order kept, no overlap
+        self.assertEqual(ts(llm1["start_time"]) - ts(root1["start_time"]), dt.timedelta(milliseconds=100))
+        self.assertTrue(llm1["dotted_order"].startswith(root1["dotted_order"] + "."))
+        self.assertEqual(root1["metadata"]["langfuse_start_time"], "2026-11-20T10:00:00.000Z")
 
 
 class FetchTracesTest(unittest.TestCase):
@@ -165,11 +175,53 @@ class CommitTagsTest(unittest.TestCase):
 
         client._create_commit_tags.side_effect = create
         with mock.patch.object(ls_utils, "_ls_client", return_value=client):
-            _, applied, failed = ls_utils.ls_push_prompt_version(
+            _, applied, failed, unchanged = ls_utils.ls_push_prompt_version(
                 "p", "", object(), "ws", commit_tags=["production", "bad"])
         self.assertEqual(applied, ["production"])
         self.assertEqual(failed, [("bad", "409 conflict")])
+        self.assertFalse(unchanged)
         self.assertIsInstance(client._create_commit_tags.call_args.args[1], str)
+
+    def test_unchanged_version_tags_the_previous_commit(self):
+        previous = SimpleNamespace(commit_hash="0123abcdef", id=uuid.uuid4(), owner="-", repo="p")
+        client = mock.Mock()
+        client.push_prompt.side_effect = LangSmithConflictError("409 Nothing to commit")
+        client.list_prompt_commits.return_value = [previous]
+        with mock.patch.object(ls_utils, "_ls_client", return_value=client):
+            url, applied, failed, unchanged = ls_utils.ls_push_prompt_version(
+                "p", "", object(), "ws", commit_tags=["staging"])
+        self.assertTrue(unchanged)
+        self.assertEqual((url, applied, failed), ("p:0123abcd", ["staging"], []))
+        self.assertEqual(client._create_commit_tags.call_args.args[1], str(previous.id))
+
+
+class PromptConversionTest(unittest.TestCase):
+    def test_variable_values_are_not_html_escaped(self):
+        value = '<doc a="1">x & y</doc>'
+        chat = build_chat_prompt({"prompt": [{"role": "system", "content": 'JSON: {"k": 1}'},
+                                             {"role": "user", "content": "ctx: {{ ctx }}"}]})
+        msgs = chat.invoke({"ctx": value}).to_messages()
+        self.assertEqual(msgs[0].content, 'JSON: {"k": 1}')
+        self.assertEqual(msgs[1].content, f"ctx: {value}")
+        text = build_chat_prompt({"prompt": "{{a}} and {{{b}}} {{#s}}x{{/s}}"})
+        self.assertEqual(text.messages[0].prompt.template, "{{{a}}} and {{{b}}} {{#s}}x{{/s}}")
+
+    def test_prompt_names(self):
+        self.assertEqual(langsmith_prompt_name("Team/Summarize.v2"), "team-summarize-v2")
+        self.assertEqual(langsmith_prompt_name("qa:eu"), "qa-eu")
+        self.assertEqual(langsmith_prompt_name("My Prompt_1"), "my-prompt_1")
+
+    def test_name_collision_skips_the_second_prompt(self):
+        history = [{"name": n, "versions": [{"version": 1, "prompt": "hi", "labels": []}]}
+                   for n in ("team/foo", "team-foo")]
+        with mock.patch.object(prompts, "lf_get_prompt_history", return_value=history), \
+             mock.patch.object(prompts, "ls_prompt_exists", return_value=False), \
+             mock.patch.object(prompts, "ls_push_prompt_version",
+                               return_value=("url", [], [], False)) as push, \
+             mock.patch("builtins.print") as out:
+            prompts.migrate_prompts("ws", "proj")
+        self.assertEqual(push.call_count, 1)
+        self.assertIn("also the name of 'team/foo'", " ".join(str(c) for c in out.call_args_list))
 
 
 if __name__ == "__main__":
