@@ -82,9 +82,9 @@ def ls_push_prompt_version(
     """Add one commit to a prompt (creating the prompt if needed), then tag it.
 
     tags are prompt-level tags. commit_tags are applied to the new commit, one at a
-    time and best effort: a tag LangSmith refuses (for example a reserved one) is
-    reported, and does not stop the migration or leave the commit untagged by the
-    others. Returns (url, applied_tags, failed_tags).
+    time and best effort: a tag LangSmith refuses is reported with the reason, and
+    does not stop the migration or leave the commit untagged by the others.
+    Returns (url, applied_tags, failed) where failed is a list of (tag, reason).
     """
     client = _ls_client(workspace_id)
     url = client.push_prompt(
@@ -95,7 +95,7 @@ def ls_push_prompt_version(
         commit_description=commit_description,
     )
     applied: list[str] = []
-    failed: list[str] = []
+    failed: list[tuple[str, str]] = []
     if not commit_tags:
         return url, applied, failed
 
@@ -110,14 +110,15 @@ def ls_push_prompt_version(
         None,
     )
     if commit is None:
-        return url, applied, list(commit_tags)
+        return url, applied, [(t, f"commit {short_hash} not found") for t in commit_tags]
     for tag in commit_tags:
         try:
-            # No public SDK method tags an existing commit yet.
-            client._create_commit_tags(f"{commit.owner}/{commit.repo}", commit.id, tag)
+            # No public SDK method tags an existing commit yet. The SDK returns
+            # commit.id as a UUID, which the request body cannot serialize.
+            client._create_commit_tags(f"{commit.owner}/{commit.repo}", str(commit.id), tag)
             applied.append(tag)
-        except Exception:
-            failed.append(tag)
+        except Exception as e:
+            failed.append((tag, str(e)[:200]))
     return url, applied, failed
 
 
@@ -210,3 +211,7 @@ def ls_replay_runs_sdk(workspace_id: str, runs: list[dict], project_name: str = 
             source=fb.get("source"),
             metadata=fb.get("metadata") or {},
         )
+
+    # Runs are uploaded in the background; wait so upload errors are printed
+    # before the migration reports that it finished.
+    client.flush()

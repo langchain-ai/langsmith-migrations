@@ -184,12 +184,8 @@ def migrate_prompts(workspace_id: str, project_id: str):
                     )[:1000],
                 )
                 print(f"       • {lf_name} v{number} (tags: {applied or 'none'})  →  {url}")
-                if failed_tags:
-                    print(
-                        f"         ! could not apply tag(s) {failed_tags} to this commit. "
-                        "staging and production are reserved tags in LangSmith: set them by "
-                        "promoting the commit in the UI."
-                    )
+                for tag, reason in failed_tags:
+                    print(f"         ! could not apply tag '{tag}' to this commit: {reason}")
             print(f"         {lf_name}  =>  LangSmith prompt '{ls_name}'")
         except Exception as e:
             print(
