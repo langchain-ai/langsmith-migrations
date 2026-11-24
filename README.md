@@ -47,9 +47,9 @@ planning a full trace migration.
 What the Langfuse migration does and does not carry over:
 
 - **Prompts**: every version of every prompt is pushed to LangSmith oldest first, so it
-  keeps the same commit history. Langfuse labels (except the automatic `latest`) are
-  applied as commit tags. `staging` and `production` are reserved in LangSmith, so a
-  label with one of those names is reported and you promote that commit in the UI.
+  keeps the same commit history. Langfuse labels (except the automatic `latest`),
+  including `production` and `staging`, are applied as commit tags; a tag LangSmith
+  refuses is reported with the reason.
   Langfuse's `{{variable}}` syntax is kept (mustache format), and chat placeholders
   become optional message placeholders. Prompt names are lowercased and spaces and `/`
   become `-`; the script prints each Langfuse name next to its LangSmith name. A prompt
@@ -58,9 +58,16 @@ What the Langfuse migration does and does not carry over:
 - **Datasets**: dataset items are copied as examples. Experiments, dataset runs, scores
   and dataset versions are not migrated.
 - **Traces**: only the most recent `NUM_TRACES_TO_REPLAY` traces are replayed, and the
-  default is 0. Models, token usage, cost and the session ID are mapped. Scores are not
-  migrated and runs get new IDs. For a full history use Langfuse's blob storage export,
-  or keep Langfuse read-only after cutover.
+  default is 0. Traces are read from the v2 observations API (Langfuse v4 and Langfuse
+  Cloud, where the v3 `/api/public/traces` endpoints return 410 since 2026-11-16); older
+  self-hosted servers without it are read through the v3 traces API. Models, token usage
+  (cached prompt tokens included), cost, errors, tags, user ID and session ID are mapped,
+  so sessions become threads. LangSmith only accepts runs that start within 24 hours of
+  now, so when the batch holds older traces their start times are moved to the last few
+  minutes, keeping their order and durations; the original start time and Langfuse trace
+  ID are in each root run's metadata (`langfuse_start_time`, `langfuse_trace_id`). Runs
+  get new IDs. Scores and experiments (dataset runs) are not migrated. For a full history
+  use Langfuse's blob storage export, or keep Langfuse read-only after cutover.
 - Not covered: evaluators, annotation queues, users and roles, API keys.
 
 ## Runbooks (Notebooks)
