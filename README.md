@@ -49,7 +49,7 @@ code to use LangSmith.
 
 | Source provider | Runbook | Additional guidance |
 | --- | --- | --- |
-| Langfuse | [Runbook](providers/langfuse/runbook.ipynb) | — |
+| Langfuse | [Runbook](providers/langfuse/runbook.ipynb) | [What is migrated and updating prompt calls](providers/langfuse/README.md) |
 | Arize Phoenix | [Runbook](providers/phoenix/runbook.ipynb) | — |
 | MLflow | [Runbook](providers/mlflow/runbook.ipynb) | [Setup and limitations](providers/mlflow/README.md) · [Standalone Databricks/local migration notebook](providers/mlflow/03_databricks_export_migrate.ipynb) |
 
