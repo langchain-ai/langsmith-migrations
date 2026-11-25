@@ -42,87 +42,6 @@ Review its runbook before importing data. The Langfuse and Arize Phoenix trace
 replay examples illustrate format conversion; use bulk export functionality when
 planning a full trace migration.
 
-## Langfuse notes
-
-What the Langfuse migration does and does not carry over:
-
-- **Prompts**: every version of every prompt is pushed to LangSmith oldest first, so it
-  keeps the same commit history. Langfuse labels (except the automatic `latest`),
-  including `production` and `staging`, are applied as commit tags; a tag LangSmith
-  refuses is reported with the reason. A version identical to the one before it (for
-  example a re-publish) adds no commit; its labels go on the previous commit.
-  Prompts use the mustache format. Variables become `{{{variable}}}` so values are
-  inserted as given, as in Langfuse (mustache's `{{variable}}` would HTML-escape them).
-  A variable with a `.` in its name, such as `{{user.name}}`, is read by mustache as a
-  nested lookup, so pass `{"user": {"name": ...}}` or rename it; the script warns
-  about these.
-  Chat placeholders become optional message placeholders. Prompt names are lowercased
-  and any character other than letters, digits, `-` and `_` becomes `-`; the script
-  prints each Langfuse name next to its LangSmith name, and skips a prompt whose
-  LangSmith name is already taken by another prompt in the same run. A prompt that
-  already exists in LangSmith is skipped, so re-runs do not add duplicate commits.
-  If a run stops partway through a prompt, delete that prompt in LangSmith and re-run.
-- **Datasets**: dataset items are copied as examples. Experiments, dataset runs, scores
-  and dataset versions are not migrated.
-- **Traces**: only the most recent `NUM_TRACES_TO_REPLAY` traces are replayed, and the
-  default is 0. Traces are read from the v2 observations API (Langfuse v4 and Langfuse
-  Cloud, where the v3 `/api/public/traces` endpoints return 410 since 2026-11-16); older
-  self-hosted servers without it are read through the v3 traces API. Models, token usage
-  (cached prompt tokens included), cost, errors, tags, user ID and session ID are mapped,
-  so sessions become threads. LangSmith only accepts runs that start within 24 hours of
-  now, so when the batch holds older traces their start times are moved to the last few
-  minutes, keeping their order and durations; the original start time and Langfuse trace
-  ID are in each root run's metadata (`langfuse_start_time`, `langfuse_trace_id`). Runs
-  get new IDs. Scores and experiments (dataset runs) are not migrated. For a full history
-  use Langfuse's blob storage export, or keep Langfuse read-only after cutover.
-- Not covered: evaluators, annotation queues, users and roles, API keys.
-
-### Updating application code: fetching prompts
-
-After the prompts are migrated, change the runtime calls that fetch and fill them.
-Checked against Langfuse Python SDK 5.2 and LangSmith SDK 0.16.
-
-| Langfuse | LangSmith | Notes |
-| --- | --- | --- |
-| Prompt name | Prompt name | Names are normalized on migration; the script prints each mapping. |
-| Prompt version | Commit | All versions migrate, oldest first. |
-| Label (`production`, `staging`, custom) | Commit tag with the same name | The automatic `latest` label is not tagged. |
-| `get_prompt("name")` | `client.pull_prompt("name:production")` | Langfuse's default is the `production` version, not the newest. |
-| `get_prompt("name", label="latest")` | `client.pull_prompt("name")` | No tag returns the newest commit. |
-| `get_prompt("name", label="staging")` | `client.pull_prompt("name:staging")` | `name:<tag>` pins a tag. |
-| `get_prompt("name", version=3)` | `client.pull_prompt("name:<commit-hash>")` | Integer versions do not resolve (404). Each commit's description says `Migrated from Langfuse version N`; the first 8 characters of the hash are enough. |
-| `prompt.compile(var="x")` on a chat prompt | `prompt.invoke({"var": "x"}).to_messages()` | LangChain messages; the roles `user` and `assistant` are `human` and `ai`. |
-| `prompt.compile(var="x")` on a text prompt | `prompt.invoke({"var": "x"}).to_messages()[0].content` | A text prompt is migrated as a chat prompt with one human message. `.to_string()` would prefix `Human: `. |
-
-```python
-from langsmith import Client
-
-client = Client()
-
-# Same version as Langfuse's get_prompt("movie-critic-chat"); "name:<hash>" pins a commit
-prompt = client.pull_prompt("movie-critic-chat:production")
-
-# Fill the variables. A chat prompt returns its messages.
-messages = prompt.invoke({"criticlevel": "harsh", "movie": "Alien"}).to_messages()
-```
-
-- `pull_prompt` caches each prompt for 5 minutes and keeps returning the cached commit
-  until a background refresh replaces it, so a new commit, or a tag moved to another
-  commit, can take about 6 minutes to reach a running service. Pass `skip_cache=True`,
-  or create the client with `Client(disable_prompt_cache=True)`, where it must show up
-  immediately.
-- Variable values are inserted as given, as in Langfuse: `<`, `>`, `&` and quotes are
-  not escaped, and literal JSON braces in the prompt stay literal. Migrated prompts use
-  the mustache format, so variables are written `{{{variable}}}`. A prompt you create
-  fresh with `ChatPromptTemplate` uses `{variable}` unless you set the format.
-- A variable with a `.` in its name, `{{user.name}}`, is filled from a nested dict:
-  `{"user": {"name": "Ana"}}`. Langfuse's flat key `{"user.name": "Ana"}` raises a
-  missing-variable error.
-- Chat placeholders are optional: omit the key or pass `[]` when there is no history.
-  (Langfuse's `compile()` leaves an unresolved placeholder in the output instead.)
-- If you keep one workspace per environment, plain `pull_prompt("name")` already
-  returns that environment's latest commit, so tags are only needed within a workspace.
-
 ## Runbooks (Notebooks)
 
 Each provider has a runbook covering resource migration and updating application
@@ -130,7 +49,7 @@ code to use LangSmith.
 
 | Source provider | Runbook | Additional guidance |
 | --- | --- | --- |
-| Langfuse | [Runbook](providers/langfuse/runbook.ipynb) | — |
+| Langfuse | [Runbook](providers/langfuse/runbook.ipynb) | [What is migrated and updating prompt calls](providers/langfuse/README.md) |
 | Arize Phoenix | [Runbook](providers/phoenix/runbook.ipynb) | — |
 | MLflow | [Runbook](providers/mlflow/runbook.ipynb) | [Setup and limitations](providers/mlflow/README.md) · [Standalone Databricks/local migration notebook](providers/mlflow/03_databricks_export_migrate.ipynb) |
 
